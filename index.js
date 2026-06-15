@@ -21,11 +21,11 @@ function saveData() {
 loadData();
 
 const commands = [
-    new SlashCommandBuilder().setName('verify').setDescription('Link Roblox').addStringOption(o => o.setName('username').setDescription('Username').setRequired(true)),
-    new SlashCommandBuilder().setName('setup-group').setDescription('Link Group ID').addStringOption(o => o.setName('groupid').setDescription('Group ID').setRequired(true)),
-    new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto create all group roles'),
-    new SlashCommandBuilder().setName('bind').setDescription('Bind rank').addIntegerOption(o => o.setName('rankid').setDescription('Rank').setRequired(true)).addRoleOption(o => o.setName('role').setDescription('Role').setRequired(true)),
-    new SlashCommandBuilder().setName('update').setDescription('Sync ranks')
+    new SlashCommandBuilder().setName('verify').setDescription('Link your Roblox account globally').addStringOption(o => o.setName('username').setDescription('Username').setRequired(true)),
+    new SlashCommandBuilder().setName('setup-group').setDescription('Link a Roblox Group ID to this server').addStringOption(o => o.setName('groupid').setDescription('Group ID').setRequired(true)),
+    new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto create and bind all group roles for this server'),
+    new SlashCommandBuilder().setName('bind').setDescription('Bind a specific rank to a role').addIntegerOption(o => o.setName('rankid').setDescription('Rank').setRequired(true)).addRoleOption(o => o.setName('role').setDescription('Role').setRequired(true)),
+    new SlashCommandBuilder().setName('update').setDescription('Sync your ranks in this server')
 ].map(c => c.toJSON());
 
 client.once('clientReady', async () => {
@@ -40,35 +40,49 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member } = interaction;
 
+    // --- VERIFY (Saved Globally) ---
     if (commandName === 'verify') {
         await interaction.deferReply();
         try {
             const res = await axios.post('https://users.roproxy.com/v1/usernames/users', { usernames: [options.getString('username')], excludeBannedUsers: true });
             if (!res.data.data.length) return interaction.editReply("❌ User not found.");
             const rId = res.data.data[0].id;
+            
+            // Global storage: tied to user ID, completely separate from server data
             data.users[interaction.user.id] = rId;
             saveData();
-            return interaction.editReply(`✅ Verified as Roblox ID: ${rId}`);
+            
+            return interaction.editReply(`✅ Verified globally as Roblox ID: ${rId}`);
         } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
     }
 
+    // --- SETUP GROUP (Saved per Server) ---
     if (commandName === 'setup-group') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
         await interaction.deferReply();
+        
+        if (!data.groups) data.groups = {};
         data.groups[guildId] = options.getString('groupid');
         saveData();
-        return interaction.editReply("✅ Group linked successfully.");
+        
+        return interaction.editReply("✅ Group linked successfully to this server.");
     }
 
+    // --- SYNC GROUP ROLES (Saved per Server) ---
     if (commandName === 'sync-group-roles') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
         await interaction.deferReply();
-        const gId = data.groups[guildId];
+        
+        const gId = data.groups ? data.groups[guildId] : null;
         if (!gId) return interaction.editReply("❌ Run /setup-group first.");
+        
         try {
             const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${gId}/roles`)).data.roles.filter(r => r.rank > 0);
             let count = 0;
+            
+            if (!data.binds) data.binds = {};
             if (!data.binds[guildId]) data.binds[guildId] = [];
+
             for (const r of rRoles) {
                 const exists = data.binds[guildId].some(b => b.groupId === gId && b.rankId === r.rank);
                 if (!exists) {
@@ -78,29 +92,38 @@ client.on('interactionCreate', async interaction => {
                 }
             }
             saveData();
-            return interaction.editReply(`🎉 Created and bound ${count} roles.`);
+            return interaction.editReply(`🎉 Created and bound ${count} roles for this server.`);
         } catch (e) { return interaction.editReply(`❌ Sync fail: ${e.message}`); }
     }
 
+    // --- BIND (Saved per Server) ---
     if (commandName === 'bind') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
         await interaction.deferReply();
-        const gId = data.groups[guildId];
+        
+        const gId = data.groups ? data.groups[guildId] : null;
         if (!gId) return interaction.editReply("❌ Run /setup-group first.");
+        
+        if (!data.binds) data.binds = {};
         if (!data.binds[guildId]) data.binds[guildId] = [];
+        
         data.binds[guildId].push({ groupId: gId, rankId: options.getInteger('rankid'), roleId: options.getRole('role').id });
         saveData();
-        return interaction.editReply("✅ Rank bound.");
+        
+        return interaction.editReply("✅ Rank bound for this server.");
     }
 
-    // --- UPDATED EMBED UPDATE COMMAND ---
+    // --- UPDATE (Checks Global Verification + Reads Server Binds) ---
     if (commandName === 'update') {
         await interaction.deferReply();
+        
+        // Checks global verification mapping
         const robloxId = data.users[interaction.user.id];
         if (!robloxId) return interaction.editReply("❌ Run `/verify` first before running update.");
         
-        const serverBinds = data.binds[guildId] || [];
-        if (!serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
+        // Fetches data unique to this server
+        const serverBinds = data.binds ? data.binds[guildId] : [];
+        if (!serverBinds || !serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
         
         try {
             let added = [];
@@ -121,11 +144,10 @@ client.on('interactionCreate', async interaction => {
                 }
             }
 
-            // Generate the visual upgrade embed matching the image layout
             const embed = new EmbedBuilder()
                 .setTitle("Update Complete")
-                .setColor(0x2ECC71) // Sleek green sidebar tint
-                .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true })) // Puts user's Discord profile pic on the right side
+                .setColor(0x2ECC71) 
+                .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true })) 
                 .addFields(
                     { name: "User:", value: `<@${interaction.user.id}>`, inline: false },
                     { name: "Roles Added", value: added.length > 0 ? added.join('\n') : "No new ranks to add.", inline: false }
