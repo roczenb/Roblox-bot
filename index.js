@@ -1,115 +1,210 @@
-const { Client, GatewayIntentBits, EmbedBuilder, REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const mongoose = require('mongoose');
 const axios = require('axios');
 
-// Create the Discord Client
-const client = new Client({ 
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] 
+// 1. Initialize Client with proper Intents
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers,
+        GatewayIntentBits.GuildMessages
+    ]
 });
 
-// Define the Slash Command
+// 2. Database Schemas (How the bot remembers data)
+const UserSchema = new mongoose.Schema({
+    discordId: { type: String, required: true, unique: true },
+    robloxId: { type: String, required: true }
+});
+const VerifiedUser = mongoose.model('VerifiedUser', UserSchema);
+
+const BindSchema = new mongoose.Schema({
+    guildId: { type: String, required: true },
+    groupId: { type: String, required: true },
+    rankId: { type: Number, required: true }, // e.g., 1-255
+    roleId: { type: String, required: true }
+});
+const RoleBind = mongoose.model('RoleBind', BindSchema);
+
+// 3. Register Slash Commands
 const commands = [
     new SlashCommandBuilder()
+        .setName('verify')
+        .setDescription('Link your Roblox account using your username')
+        .addStringOption(option => option.setName('username').setDescription('Your Roblox Username').setRequired(true)),
+    
+    new SlashCommandBuilder()
+        .setName('bind')
+        .setDescription('Admin Only: Bind a Roblox rank to a Discord role')
+        .addStringOption(option => option.setName('groupid').setDescription('Roblox Group ID').setRequired(true))
+        .addIntegerOption(option => option.setName('rankid').setDescription('Rank number (1-255)').setRequired(true))
+        .addRoleOption(option => option.setName('role').setDescription('Discord role to give').setRequired(true)),
+        
+    new SlashCommandBuilder()
         .setName('update')
-        .setDescription('Syncs your profile with any Roblox group rank')
-        .addStringOption(option => 
-            option.setName('username')
-                .setDescription('The Roblox Username')
-                .setRequired(true))
-        .addStringOption(option =>
-            option.setName('group_id')
-                .setDescription('The ID of the Roblox Group')
-                .setRequired(true))
+        .setDescription('Sync your current Roblox ranks to your Discord roles')
 ].map(command => command.toJSON());
 
-// When the bot boots up
+// 4. Client Ready Event
 client.once('clientReady', async () => {
-    console.log(`Logged in safely as ${client.user.tag}!`);
+    console.log(`Logged in as ${client.user.tag}`);
     
-    // Register the slash commands globally on Discord
+    // Connect to MongoDB using Railway environment variable
+    if (process.env.MONGO_URL) {
+        await mongoose.connect(process.env.MONGO_URL);
+        console.log("Connected seamlessly to MongoDB Database.");
+    } else {
+        console.log("WARNING: MONGO_URL variable is missing. Database features will fail.");
+    }
+
+    // Deploy commands to Discord API
     const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
     try {
-        console.log('Refreshing infinite-group commands...');
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('--- INFINITE-GROUP BOT IS LIVE ---');
+        console.log('Successfully reloaded application (/) commands globally.');
     } catch (error) {
-        console.error('Error registering slash commands:', error);
+        console.error(error);
     }
 });
 
-// Handle the interaction command
+// 5. Command Interactions
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    if (interaction.commandName === 'update') {
-        const username = interaction.options.getString('username');
-        const groupIdInput = interaction.options.getString('group_id').trim();
-        
-        // Convert the input string into a number
-        const targetGroupId = parseInt(groupIdInput, 10);
+    const { commandName, options, guildId, member } = interaction;
 
+    // --- VERIFY COMMAND ---
+    if (commandName === 'verify') {
+        await interaction.deferReply();
+        const username = options.getString('username');
+
+        try {
+            // Fetch Roblox user ID from username
+            const robloxRes = await axios.post('https://users.roblox.com/v1/usernames/users', {
+                usernames: [username],
+                excludeBannedUsers: true
+            });
+
+            if (!robloxRes.data.data.length) {
+                return interaction.editReply("❌ That Roblox username does not exist.");
+            }
+
+            const robloxId = robloxRes.data.data[0].id;
+
+            // Save relationship to the Database
+            await VerifiedUser.findOneAndUpdate(
+                { discordId: interaction.user.id },
+                { robloxId: robloxId },
+                { upsert: true, new: true }
+            );
+
+            const embed = new EmbedBuilder()
+                .setTitle("✅ Verification Successful")
+                .setDescription(`Successfully linked **${username}** (${robloxId}) to your Discord account!\nRun \`/update\` to fetch your roles.`)
+                .setColor(0x00FF00);
+
+            return interaction.editReply({ embeds: [embed] });
+        } catch (err) {
+            console.error(err);
+            return interaction.editReply("❌ Something went wrong while verifying.");
+        }
+    }
+
+    // --- BIND COMMAND (ADMIN ONLY) ---
+    if (commandName === 'bind') {
+        if (!member.permissions.has('Administrator')) {
+            return interaction.reply({ content: "❌ You must be an Administrator to run this.", ephemeral: true });
+        }
+
+        const groupId = options.getString('groupid');
+        const rankId = options.getInteger('rankid');
+        const role = options.getRole('role');
+
+        // Save bind setting to Database
+        await RoleBind.create({
+            guildId: guildId,
+            groupId: groupId,
+            rankId: rankId,
+            roleId: role.id
+        });
+
+        return interaction.reply(`✅ Successfully bound Group **${groupId}** (Rank: ${rankId}) to role **${role.name}**!`);
+    }
+
+    // --- UPDATE COMMAND ---
+    if (commandName === 'update') {
         await interaction.deferReply();
 
-        // Safety check to ensure they entered a valid number for the Group ID
-        if (isNaN(targetGroupId)) {
-            return interaction.editReply('❌ Please enter a valid number for the Group ID!');
+        // 1. Check if user is verified in DB
+        const userData = await VerifiedUser.findOne({ discordId: interaction.user.id });
+        if (!userData) {
+            return interaction.editReply("❌ You are not verified yet. Run `/verify` first.");
         }
 
         try {
-            // 1. Resolve Roblox Username to User ID
-            const userResponse = await axios.post('https://users.roblox.com/v1/usernames/users', { 
-                usernames: [username], 
-                excludeBannedUsers: false 
-            });
-            
-            if (!userResponse.data.data || userResponse.data.data.length === 0) {
-                return interaction.editReply(`❌ User "${username}" not found on Roblox.`);
-            }
-            
-            const userId = userResponse.data.data[0].id;
-            const actualName = userResponse.data.data[0].name;
-
-            // 2. Fetch all groups the user is in
-            const groupResponse = await axios.get(`https://groups.roblox.com/v1/users/${userId}/groups/roles`);
-            const targetedGroup = groupResponse.data.data.find(g => g.group.id === targetGroupId);
-
-            let rankName = "Non-Member", rankId = 0, groupName = `Group #${targetGroupId}`;
-            if (targetedGroup) { 
-                rankName = targetedGroup.role.name; 
-                rankId = targetedGroup.role.rank; 
-                groupName = targetedGroup.group.name;
+            // 2. Fetch all active binds for this Discord Server
+            const serverBinds = await RoleBind.find({ guildId: guildId });
+            if (!serverBinds.length) {
+                return interaction.editReply("❌ This server doesn't have any roles bound yet. Ask an admin to use `/bind`.");
             }
 
-            // 3. Grab Avatar Thumbnail
-            const thumbResponse = await axios.get(`https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=180x180&format=Png&isCircular=false`);
-            const avatarUrl = thumbResponse.data.data[0]?.imageUrl || '';
+            let rolesAdded = [];
+            let rolesRemoved = [];
 
-            // 4. Build the profile embed card
-            const embed = new EmbedBuilder()
-                .setColor(targetedGroup ? '#00FF7F' : '#FF4500')
-                .setTitle(`🔄 Group Sync: ${actualName}`)
-                .setDescription(`Checked against group: **${groupName}**`)
-                .addFields(
-                    { name: 'Group Rank Name', value: `${rankName}`, inline: true }, 
-                    { name: 'Rank Level (0-255)', value: `${rankId}`, inline: true }
-                )
-                .setThumbnail(avatarUrl)
-                .setFooter({ text: `ID: ${targetGroupId}` })
-                .setTimestamp();
+            // 3. Process binds loop
+            for (const bind of serverBinds) {
+                // Fetch user rank in specific Roblox group
+                const groupRes = await axios.get(`https://groups.roblox.com/v2/users/${userData.robloxId}/groups/roles`);
+                const groupMatch = groupRes.data.data.find(g => g.group.id.toString() === bind.groupId);
+                
+                const currentRank = groupMatch ? groupMatch.role.rank : 0;
+                const targetRole = interaction.guild.roles.cache.get(bind.roleId);
 
-            // 5. Attempt to update Discord Nickname
-            try { 
-                if (interaction.member.id !== interaction.guild.ownerId) {
-                    await interaction.member.setNickname(`[${rankName}] ${actualName}`); 
+                if (targetRole) {
+                    if (currentRank === bind.rankId) {
+                        if (!member.roles.cache.has(targetRole.id)) {
+                            await member.roles.add(targetRole);
+                            rolesAdded.push(targetRole.name);
+                        }
+                    } else {
+                        if (member.roles.cache.has(targetRole.id)) {
+                            await member.roles.remove(targetRole);
+                            rolesRemoved.push(targetRole.name);
+                        }
+                    }
                 }
-            } catch (err) {}
+            }
 
-            await interaction.editReply({ embeds: [embed] });
-        } catch (error) {
-            console.error(error);
-            await interaction.editReply('❌ Error communicating with Roblox. Make sure that Group ID actually exists!');
+            return interaction.editReply(`🔄 **Roles Updated!**\n**Added:** ${rolesAdded.join(', ') || 'None'}\n**Removed:** ${rolesRemoved.join(', ') || 'None'}`);
+
+        } catch (err) {
+            console.error(err);
+            return interaction.editReply("❌ Network error updating your ranks.");
         }
     }
 });
 
-// Login to Discord using the environment variable hidden safely on Railway
+// 6. Automatically update users when joining server
+client.on('guildMemberAdd', async (member) => {
+    const userData = await VerifiedUser.findOne({ discordId: member.id });
+    if (!userData) return; // Not verified, do nothing
+
+    const serverBinds = await RoleBind.find({ guildId: member.guild.id });
+    
+    for (const bind of serverBinds) {
+        try {
+            const groupRes = await axios.get(`https://groups.roblox.com/v2/users/${userData.robloxId}/groups/roles`);
+            const groupMatch = groupRes.data.data.find(g => g.group.id.toString() === bind.groupId);
+            const currentRank = groupMatch ? groupMatch.role.rank : 0;
+            const targetRole = member.guild.roles.cache.get(bind.roleId);
+
+            if (targetRole && currentRank === bind.rankId) {
+                await member.roles.add(targetRole);
+            }
+        } catch (e) {
+            console.error("Auto-role fail on join: ", e.message);
+        }
+    }
+});
+
 client.login(process.env.BOT_TOKEN);
