@@ -20,14 +20,6 @@ const commands = [
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    // Fallback connection string if your Railway variable fails
-    const fallbackURI = "mongodb+srv://publicBotUser:BotPass123!@cluster0.whv9s.mongodb.net/robloxBot?retryWrites=true&w=majority";
-    const connectionString = process.env.MONGO_URL || fallbackURI;
-    
-    await mongoose.connect(connectionString)
-        .then(() => console.log("DB Online"))
-        .catch(e => console.log("DB Offline fallback error: ", e.message));
-
     try {
         await new REST({ version: '10' }).setToken(process.env.BOT_TOKEN).put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Commands deployed!');
@@ -38,6 +30,7 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member } = interaction;
 
+    // --- VERIFY ---
     if (commandName === 'verify') {
         await interaction.deferReply();
         try {
@@ -49,12 +42,17 @@ client.on('interactionCreate', async interaction => {
         } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
     }
 
+    // --- SETUP GROUP (Added Defer to fix timeout) ---
     if (commandName === 'setup-group') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
-        await DB.Group.findOneAndUpdate({ guildId }, { groupId: options.getString('groupid') }, { upsert: true });
-        return interaction.reply("✅ Group linked successfully.");
+        await interaction.deferReply();
+        try {
+            await DB.Group.findOneAndUpdate({ guildId }, { groupId: options.getString('groupid') }, { upsert: true });
+            return interaction.editReply("✅ Group linked successfully.");
+        } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
     }
 
+    // --- SYNC GROUP ROLES ---
     if (commandName === 'sync-group-roles') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
         await interaction.deferReply();
@@ -74,14 +72,19 @@ client.on('interactionCreate', async interaction => {
         } catch (e) { return interaction.editReply(`❌ Sync fail: ${e.message}`); }
     }
 
+    // --- BIND (Added Defer to fix timeout) ---
     if (commandName === 'bind') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
-        const conf = await DB.Group.findOne({ guildId });
-        if (!conf) return interaction.reply("❌ Run /setup-group first.");
-        await DB.Bind.create({ guildId, groupId: conf.groupId, rankId: options.getInteger('rankid'), roleId: options.getRole('role').id });
-        return interaction.reply("✅ Rank bound.");
+        await interaction.deferReply();
+        try {
+            const conf = await DB.Group.findOne({ guildId });
+            if (!conf) return interaction.editReply("❌ Run /setup-group first.");
+            await DB.Bind.create({ guildId, groupId: conf.groupId, rankId: options.getInteger('rankid'), roleId: options.getRole('role').id });
+            return interaction.editReply("✅ Rank bound.");
+        } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
     }
 
+    // --- UPDATE ---
     if (commandName === 'update') {
         await interaction.deferReply();
         const u = await DB.User.findOne({ discordId: interaction.user.id });
@@ -105,4 +108,11 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-client.login(process.env.BOT_TOKEN);
+// Start DB before logging into Discord to prevent early command triggers
+const fallbackURI = "mongodb+srv://publicBotUser:BotPass123!@cluster0.whv9s.mongodb.net/robloxBot?retryWrites=true&w=majority";
+mongoose.connect(process.env.MONGO_URL || fallbackURI)
+    .then(() => {
+        console.log("DB Connected!");
+        client.login(process.env.BOT_TOKEN);
+    })
+    .catch(e => console.log("Critical boot error: ", e.message));
