@@ -197,3 +197,4 @@ client.on('interactionCreate', async interaction => {
                         if (member.roles.cache.has(targetRole.id)) {
                             await member.roles.remove(targetRole);
                             rolesRemoved.push
+client.login(process.env.BOT_TOKEN);
