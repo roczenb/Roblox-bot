@@ -5,7 +5,6 @@ const path = require('path');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages] });
 
-// Self-contained Local File Storage (No Cloud DB Required)
 const DB_FILE = path.join(__dirname, 'bot_data.json');
 let data = { users: {}, groups: {}, binds: {} };
 
@@ -33,7 +32,8 @@ const commands = [
     new SlashCommandBuilder().setName('update').setDescription('Sync ranks')
 ].map(c => c.toJSON());
 
-client.once('ready', async () => {
+// FIX: Swapped to 'clientReady' to stop the warning
+client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
         await new REST({ version: '10' }).setToken(process.env.BOT_TOKEN).put(Routes.applicationCommands(client.user.id), { body: commands });
@@ -45,46 +45,35 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member } = interaction;
 
-    // --- VERIFY ---
     if (commandName === 'verify') {
         await interaction.deferReply();
         try {
             const res = await axios.post('https://users.roproxy.com/v1/usernames/users', { usernames: [options.getString('username')], excludeBannedUsers: true });
             if (!res.data.data.length) return interaction.editReply("❌ User not found.");
             const rId = res.data.data[0].id;
-            
             data.users[interaction.user.id] = rId;
             saveData();
-
             return interaction.editReply(`✅ Verified as Roblox ID: ${rId}`);
         } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
     }
 
-    // --- SETUP GROUP ---
     if (commandName === 'setup-group') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
         await interaction.deferReply();
-        
         data.groups[guildId] = options.getString('groupid');
         saveData();
-        
         return interaction.editReply("✅ Group linked successfully.");
     }
 
-    // --- SYNC GROUP ROLES ---
     if (commandName === 'sync-group-roles') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
         await interaction.deferReply();
-        
         const gId = data.groups[guildId];
         if (!gId) return interaction.editReply("❌ Run /setup-group first.");
-        
         try {
             const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${gId}/roles`)).data.roles.filter(r => r.rank > 0);
             let count = 0;
-            
             if (!data.binds[guildId]) data.binds[guildId] = [];
-
             for (const r of rRoles) {
                 const exists = data.binds[guildId].some(b => b.groupId === gId && b.rankId === r.rank);
                 if (!exists) {
@@ -98,51 +87,33 @@ client.on('interactionCreate', async interaction => {
         } catch (e) { return interaction.editReply(`❌ Sync fail: ${e.message}`); }
     }
 
-    // --- BIND ---
     if (commandName === 'bind') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
         await interaction.deferReply();
-        
         const gId = data.groups[guildId];
         if (!gId) return interaction.editReply("❌ Run /setup-group first.");
-        
         if (!data.binds[guildId]) data.binds[guildId] = [];
-        data.binds[guildId].push({
-            groupId: gId,
-            rankId: options.getInteger('rankid'),
-            roleId: options.getRole('role').id
-        });
+        data.binds[guildId].push({ groupId: gId, rankId: options.getInteger('rankid'), roleId: options.getRole('role').id });
         saveData();
-        
         return interaction.editReply("✅ Rank bound.");
     }
 
-    // --- UPDATE ---
     if (commandName === 'update') {
         await interaction.deferReply();
-        
         const robloxId = data.users[interaction.user.id];
         if (!robloxId) return interaction.editReply("❌ Run /verify first.");
-        
         const serverBinds = data.binds[guildId] || [];
         if (!serverBinds.length) return interaction.editReply("❌ No roles bound.");
-        
         try {
             let added = [];
             const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
-            
             for (const b of serverBinds) {
                 const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
                 const rank = match ? match.role.rank : 0;
                 const role = interaction.guild.roles.cache.get(b.roleId);
-                
                 if (role) {
-                    if (rank === b.rankId && !member.roles.cache.has(role.id)) { 
-                        await member.roles.add(role); 
-                        added.push(role.name); 
-                    } else if (rank !== b.rankId && member.roles.cache.has(role.id)) { 
-                        await member.roles.remove(role); 
-                    }
+                    if (rank === b.rankId && !member.roles.cache.has(role.id)) { await member.roles.add(role); added.push(role.name); }
+                    else if (rank !== b.rankId && member.roles.cache.has(role.id)) { await member.roles.remove(role); }
                 }
             }
             return interaction.editReply(`🔄 Sync complete. Added: ${added.join(', ') || 'None'}`);
