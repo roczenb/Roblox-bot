@@ -22,7 +22,7 @@ const commands = [
 ].map(command => command.toJSON());
 
 // When the bot boots up
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`Logged in safely as ${client.user.tag}!`);
     
     // Register the slash commands globally on Discord
