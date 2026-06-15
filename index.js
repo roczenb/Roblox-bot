@@ -5,13 +5,21 @@ const path = require('path');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages] });
 
-const DB_FILE = path.join(__dirname, 'bot_data.json');
+// Permanent storage path mapped to your Railway Volume
+const DB_FILE = '/app/data/bot_data.json';
 let data = { users: {}, groups: {}, binds: {} };
 
 function loadData() {
     try {
-        if (fs.existsSync(DB_FILE)) data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-    } catch (e) { console.log("Local DB fallback."); }
+        // Automatically creates the storage folder if it doesn't exist yet
+        const dir = path.dirname(DB_FILE);
+        if (!fs.existsSync(dir)) {
+            fs.mkdirSync(dir, { recursive: true });
+        }
+        if (fs.existsSync(DB_FILE)) {
+            data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        }
+    } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
 
 function saveData() {
@@ -48,7 +56,6 @@ client.on('interactionCreate', async interaction => {
             if (!res.data.data.length) return interaction.editReply("❌ User not found.");
             const rId = res.data.data[0].id;
             
-            // Global storage: tied to user ID, completely separate from server data
             data.users[interaction.user.id] = rId;
             saveData();
             
@@ -113,15 +120,13 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply("✅ Rank bound for this server.");
     }
 
-    // --- UPDATE (Checks Global Verification + Reads Server Binds) ---
+    // --- UPDATE (Global Verifications + Server Binds with Embed) ---
     if (commandName === 'update') {
         await interaction.deferReply();
         
-        // Checks global verification mapping
         const robloxId = data.users[interaction.user.id];
         if (!robloxId) return interaction.editReply("❌ Run `/verify` first before running update.");
         
-        // Fetches data unique to this server
         const serverBinds = data.binds ? data.binds[guildId] : [];
         if (!serverBinds || !serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
         
