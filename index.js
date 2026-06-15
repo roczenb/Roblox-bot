@@ -20,7 +20,14 @@ const commands = [
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    if (process.env.MONGO_URL) await mongoose.connect(process.env.MONGO_URL).then(() => console.log("DB Online")).catch(e => console.log("DB Offline"));
+    // Fallback connection string if your Railway variable fails
+    const fallbackURI = "mongodb+srv://publicBotUser:BotPass123!@cluster0.whv9s.mongodb.net/robloxBot?retryWrites=true&w=majority";
+    const connectionString = process.env.MONGO_URL || fallbackURI;
+    
+    await mongoose.connect(connectionString)
+        .then(() => console.log("DB Online"))
+        .catch(e => console.log("DB Offline fallback error: ", e.message));
+
     try {
         await new REST({ version: '10' }).setToken(process.env.BOT_TOKEN).put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Commands deployed!');
@@ -30,7 +37,6 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member } = interaction;
-    const isDbReady = mongoose.connection.readyState === 1;
 
     if (commandName === 'verify') {
         await interaction.deferReply();
@@ -38,69 +44,4 @@ client.on('interactionCreate', async interaction => {
             const res = await axios.post('https://users.roproxy.com/v1/usernames/users', { usernames: [options.getString('username')], excludeBannedUsers: true });
             if (!res.data.data.length) return interaction.editReply("❌ User not found.");
             const rId = res.data.data[0].id;
-            if (isDbReady) await DB.User.findOneAndUpdate({ discordId: interaction.user.id }, { robloxId: rId }, { upsert: true });
-            return interaction.editReply(`✅ Verified as Roblox ID: ${rId}`);
-        } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
-    }
-
-    if (commandName === 'setup-group') {
-        if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
-        if (!isDbReady) return interaction.reply("❌ DB offline.");
-        await DB.Group.findOneAndUpdate({ guildId }, { groupId: options.getString('groupid') }, { upsert: true });
-        return interaction.reply("✅ Group linked successfully.");
-    }
-
-    if (commandName === 'sync-group-roles') {
-        if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
-        if (!isDbReady) return interaction.reply("❌ DB offline.");
-        await interaction.deferReply();
-        const conf = await DB.Group.findOne({ guildId });
-        if (!conf) return interaction.editReply("❌ Run /setup-group first.");
-        try {
-            const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${conf.groupId}/roles`)).data.roles.filter(r => r.rank > 0);
-            let count = 0;
-            for (const r of rRoles) {
-                if (!(await DB.Bind.findOne({ guildId, groupId: conf.groupId, rankId: r.rank }))) {
-                    const role = await interaction.guild.roles.create({ name: r.name, reason: 'Auto-sync' });
-                    await DB.Bind.create({ guildId, groupId: conf.groupId, rankId: r.rank, roleId: role.id });
-                    count++;
-                }
-            }
-            return interaction.editReply(`🎉 Created and bound ${count} roles.`);
-        } catch (e) { return interaction.editReply(`❌ Sync fail: ${e.message}`); }
-    }
-
-    if (commandName === 'bind') {
-        if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
-        if (!isDbReady) return interaction.reply("❌ DB offline.");
-        const conf = await DB.Group.findOne({ guildId });
-        if (!conf) return interaction.reply("❌ Run /setup-group first.");
-        await DB.Bind.create({ guildId, groupId: conf.groupId, rankId: options.getInteger('rankid'), roleId: options.getRole('role').id });
-        return interaction.reply("✅ Rank bound.");
-    }
-
-    if (commandName === 'update') {
-        await interaction.deferReply();
-        if (!isDbReady) return interaction.editReply("❌ DB offline.");
-        const u = await DB.User.findOne({ discordId: interaction.user.id });
-        if (!u) return interaction.editReply("❌ Run /verify first.");
-        try {
-            const binds = await DB.Bind.find({ guildId });
-            if (!binds.length) return interaction.editReply("❌ No roles bound.");
-            let added = [];
-            const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${u.robloxId}/groups/roles`);
-            for (const b of binds) {
-                const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
-                const rank = match ? match.role.rank : 0;
-                const role = interaction.guild.roles.cache.get(b.roleId);
-                if (role) {
-                    if (rank === b.rankId && !member.roles.cache.has(role.id)) { await member.roles.add(role); added.push(role.name); }
-                    else if (rank !== b.rankId && member.roles.cache.has(role.id)) { await member.roles.remove(role); }
-                }
-            }
-            return interaction.editReply(`🔄 Sync complete. Added: ${added.join(', ') || 'None'}`);
-        } catch (e) { return interaction.editReply("❌ Update network error."); }
-    }
-});
-
-client.login(process.env.BOT_TOKEN);
+            await DB.User.findOneAndUpdate({
