@@ -1,55 +1,106 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
 const mongoose = require('mongoose');
 const axios = require('axios');
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages] });
 
-// Database Schemas
-const UserSchema = new mongoose.Schema({ discordId: { type: String, required: true, unique: true }, robloxId: { type: String, required: true } });
-const VerifiedUser = mongoose.model('VerifiedUser', UserSchema);
-
-const GuildGroupSchema = new mongoose.Schema({ guildId: { type: String, required: true, unique: true }, groupId: { type: String, required: true } });
-const GuildGroup = mongoose.model('GuildGroup', GuildGroupSchema);
-
-const BindSchema = new mongoose.Schema({ guildId: { type: String, required: true }, groupId: { type: String, required: true }, rankId: { type: Number, required: true }, roleId: { type: String, required: true } });
-const RoleBind = mongoose.model('RoleBind', BindSchema);
+const DB = {
+    User: mongoose.model('U', new mongoose.Schema({ discordId: String, robloxId: String })),
+    Group: mongoose.model('G', new mongoose.Schema({ guildId: String, groupId: String })),
+    Bind: mongoose.model('B', new mongoose.Schema({ guildId: String, groupId: String, rankId: Number, roleId: String }))
+};
 
 const commands = [
-    new SlashCommandBuilder().setName('verify').setDescription('Link your Roblox account').addStringOption(o => o.setName('username').setDescription('Roblox Username').setRequired(true)),
-    new SlashCommandBuilder().setName('setup-group').setDescription('Link your Roblox Group ID').addStringOption(o => o.setName('groupid').setDescription('Group ID').setRequired(true)),
-    new SlashCommandBuilder().setName('sync-group-roles').setDescription('Admin Only: Automatically create and bind Discord roles for every Roblox group rank'),
-    new SlashCommandBuilder().setName('bind').setDescription('Bind rank to role').addIntegerOption(o => o.setName('rankid').setDescription('Rank (1-255)').setRequired(true)).addRoleOption(o => o.setName('role').setDescription('Role').setRequired(true)),
-    new SlashCommandBuilder().setName('update').setDescription('Sync your ranks')
+    new SlashCommandBuilder().setName('verify').setDescription('Link Roblox').addStringOption(o => o.setName('username').setDescription('Username').setRequired(true)),
+    new SlashCommandBuilder().setName('setup-group').setDescription('Link Group ID').addStringOption(o => o.setName('groupid').setDescription('Group ID').setRequired(true)),
+    new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto create all group roles'),
+    new SlashCommandBuilder().setName('bind').setDescription('Bind rank').addIntegerOption(o => o.setName('rankid').setDescription('Rank').setRequired(true)).addRoleOption(o => o.setName('role').setDescription('Role').setRequired(true)),
+    new SlashCommandBuilder().setName('update').setDescription('Sync ranks')
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    
-    // Fixed Database Connection Block
-    if (process.env.MONGO_URL) {
-        try {
-            await mongoose.connect(process.env.MONGO_URL);
-            console.log("Connected seamlessly to MongoDB Database.");
-        } catch (dbErr) {
-            console.error("DATABASE ERROR: Bot running without DB features.", dbErr.message);
-        }
-    } else {
-        console.log("NO MONGO_URL DETECTED. Operating in standalone mode.");
-    }
-
-    const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
+    if (process.env.MONGO_URL) await mongoose.connect(process.env.MONGO_URL).then(() => console.log("DB Online")).catch(e => console.log("DB Offline"));
     try {
-        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('Successfully reloaded application (/) commands globally.');
-    } catch (e) { console.error("COMMAND DEPLOY ERROR:", e.message); }
+        await new REST({ version: '10' }).setToken(process.env.BOT_TOKEN).put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log('Commands deployed!');
+    } catch (e) { console.error(e); }
 });
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member } = interaction;
+    const isDbReady = mongoose.connection.readyState === 1;
 
     if (commandName === 'verify') {
         await interaction.deferReply();
         try {
             const res = await axios.post('https://users.roproxy.com/v1/usernames/users', { usernames: [options.getString('username')], excludeBannedUsers: true });
-            if (!res.data.data.length) return interaction.editReply("❌
+            if (!res.data.data.length) return interaction.editReply("❌ User not found.");
+            const rId = res.data.data[0].id;
+            if (isDbReady) await DB.User.findOneAndUpdate({ discordId: interaction.user.id }, { robloxId: rId }, { upsert: true });
+            return interaction.editReply(`✅ Verified as Roblox ID: ${rId}`);
+        } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
+    }
+
+    if (commandName === 'setup-group') {
+        if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
+        if (!isDbReady) return interaction.reply("❌ DB offline.");
+        await DB.Group.findOneAndUpdate({ guildId }, { groupId: options.getString('groupid') }, { upsert: true });
+        return interaction.reply("✅ Group linked successfully.");
+    }
+
+    if (commandName === 'sync-group-roles') {
+        if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
+        if (!isDbReady) return interaction.reply("❌ DB offline.");
+        await interaction.deferReply();
+        const conf = await DB.Group.findOne({ guildId });
+        if (!conf) return interaction.editReply("❌ Run /setup-group first.");
+        try {
+            const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${conf.groupId}/roles`)).data.roles.filter(r => r.rank > 0);
+            let count = 0;
+            for (const r of rRoles) {
+                if (!(await DB.Bind.findOne({ guildId, groupId: conf.groupId, rankId: r.rank }))) {
+                    const role = await interaction.guild.roles.create({ name: r.name, reason: 'Auto-sync' });
+                    await DB.Bind.create({ guildId, groupId: conf.groupId, rankId: r.rank, roleId: role.id });
+                    count++;
+                }
+            }
+            return interaction.editReply(`🎉 Created and bound ${count} roles.`);
+        } catch (e) { return interaction.editReply(`❌ Sync fail: ${e.message}`); }
+    }
+
+    if (commandName === 'bind') {
+        if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
+        if (!isDbReady) return interaction.reply("❌ DB offline.");
+        const conf = await DB.Group.findOne({ guildId });
+        if (!conf) return interaction.reply("❌ Run /setup-group first.");
+        await DB.Bind.create({ guildId, groupId: conf.groupId, rankId: options.getInteger('rankid'), roleId: options.getRole('role').id });
+        return interaction.reply("✅ Rank bound.");
+    }
+
+    if (commandName === 'update') {
+        await interaction.deferReply();
+        if (!isDbReady) return interaction.editReply("❌ DB offline.");
+        const u = await DB.User.findOne({ discordId: interaction.user.id });
+        if (!u) return interaction.editReply("❌ Run /verify first.");
+        try {
+            const binds = await DB.Bind.find({ guildId });
+            if (!binds.length) return interaction.editReply("❌ No roles bound.");
+            let added = [];
+            const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${u.robloxId}/groups/roles`);
+            for (const b of binds) {
+                const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
+                const rank = match ? match.role.rank : 0;
+                const role = interaction.guild.roles.cache.get(b.roleId);
+                if (role) {
+                    if (rank === b.rankId && !member.roles.cache.has(role.id)) { await member.roles.add(role); added.push(role.name); }
+                    else if (rank !== b.rankId && member.roles.cache.has(role.id)) { await member.roles.remove(role); }
+                }
+            }
+            return interaction.editReply(`🔄 Sync complete. Added: ${added.join(', ') || 'None'}`);
+        } catch (e) { return interaction.editReply("❌ Update network error."); }
+    }
+});
+
+client.login(process.env.BOT_TOKEN);
