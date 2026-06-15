@@ -197,4 +197,10 @@ client.on('interactionCreate', async interaction => {
                         if (member.roles.cache.has(targetRole.id)) {
                             await member.roles.remove(targetRole);
                             rolesRemoved.push
+}
+    } catch (e) {
+        console.error("Auto-role fail on join: ", e.message);
+    }
+});
+
 client.login(process.env.BOT_TOKEN);
