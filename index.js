@@ -44,4 +44,65 @@ client.on('interactionCreate', async interaction => {
             const res = await axios.post('https://users.roproxy.com/v1/usernames/users', { usernames: [options.getString('username')], excludeBannedUsers: true });
             if (!res.data.data.length) return interaction.editReply("❌ User not found.");
             const rId = res.data.data[0].id;
-            await DB.User.findOneAndUpdate({
+            await DB.User.findOneAndUpdate({ discordId: interaction.user.id }, { robloxId: rId }, { upsert: true });
+            return interaction.editReply(`✅ Verified as Roblox ID: ${rId}`);
+        } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
+    }
+
+    if (commandName === 'setup-group') {
+        if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
+        await DB.Group.findOneAndUpdate({ guildId }, { groupId: options.getString('groupid') }, { upsert: true });
+        return interaction.reply("✅ Group linked successfully.");
+    }
+
+    if (commandName === 'sync-group-roles') {
+        if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
+        await interaction.deferReply();
+        const conf = await DB.Group.findOne({ guildId });
+        if (!conf) return interaction.editReply("❌ Run /setup-group first.");
+        try {
+            const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${conf.groupId}/roles`)).data.roles.filter(r => r.rank > 0);
+            let count = 0;
+            for (const r of rRoles) {
+                if (!(await DB.Bind.findOne({ guildId, groupId: conf.groupId, rankId: r.rank }))) {
+                    const role = await interaction.guild.roles.create({ name: r.name, reason: 'Auto-sync' });
+                    await DB.Bind.create({ guildId, groupId: conf.groupId, rankId: r.rank, roleId: role.id });
+                    count++;
+                }
+            }
+            return interaction.editReply(`🎉 Created and bound ${count} roles.`);
+        } catch (e) { return interaction.editReply(`❌ Sync fail: ${e.message}`); }
+    }
+
+    if (commandName === 'bind') {
+        if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
+        const conf = await DB.Group.findOne({ guildId });
+        if (!conf) return interaction.reply("❌ Run /setup-group first.");
+        await DB.Bind.create({ guildId, groupId: conf.groupId, rankId: options.getInteger('rankid'), roleId: options.getRole('role').id });
+        return interaction.reply("✅ Rank bound.");
+    }
+
+    if (commandName === 'update') {
+        await interaction.deferReply();
+        const u = await DB.User.findOne({ discordId: interaction.user.id });
+        if (!u) return interaction.editReply("❌ Run /verify first.");
+        try {
+            const binds = await DB.Bind.find({ guildId });
+            if (!binds.length) return interaction.editReply("❌ No roles bound.");
+            let added = [];
+            const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${u.robloxId}/groups/roles`);
+            for (const b of binds) {
+                const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
+                const rank = match ? match.role.rank : 0;
+                const role = interaction.guild.roles.cache.get(b.roleId);
+                if (role) {
+                    if (rank === b.rankId && !member.roles.cache.has(role.id)) { await member.roles.add(role); added.push(role.name); }
+                    else if (rank !== b.rankId && member.roles.cache.has(role.id)) { await member.roles.remove(role); }
+                }
+            }
+            return interaction.editReply(`🔄 Sync complete. Added: ${added.join(', ') || 'None'}`);
+        } catch (e) { return interaction.editReply("❌ Update network error."); }
+    }
+});
+
+client.login(process.env.BOT_TOKEN);
