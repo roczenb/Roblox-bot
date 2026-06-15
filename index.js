@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -10,16 +10,12 @@ let data = { users: {}, groups: {}, binds: {} };
 
 function loadData() {
     try {
-        if (fs.existsSync(DB_FILE)) {
-            data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-        }
-    } catch (e) { console.log("Local DB initialization fallback."); }
+        if (fs.existsSync(DB_FILE)) data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+    } catch (e) { console.log("Local DB fallback."); }
 }
 
 function saveData() {
-    try {
-        fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2));
-    } catch (e) { console.error("Failed to write data:", e); }
+    try { fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2)); } catch (e) { console.error(e); }
 }
 
 loadData();
@@ -32,12 +28,11 @@ const commands = [
     new SlashCommandBuilder().setName('update').setDescription('Sync ranks')
 ].map(c => c.toJSON());
 
-// FIX: Swapped to 'clientReady' to stop the warning
 client.once('clientReady', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
         await new REST({ version: '10' }).setToken(process.env.BOT_TOKEN).put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('Commands deployed completely!');
+        console.log('Commands deployed!');
     } catch (e) { console.error(e); }
 });
 
@@ -98,25 +93,45 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply("✅ Rank bound.");
     }
 
+    // --- UPDATED EMBED UPDATE COMMAND ---
     if (commandName === 'update') {
         await interaction.deferReply();
         const robloxId = data.users[interaction.user.id];
-        if (!robloxId) return interaction.editReply("❌ Run /verify first.");
+        if (!robloxId) return interaction.editReply("❌ Run `/verify` first before running update.");
+        
         const serverBinds = data.binds[guildId] || [];
-        if (!serverBinds.length) return interaction.editReply("❌ No roles bound.");
+        if (!serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
+        
         try {
             let added = [];
             const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
+            
             for (const b of serverBinds) {
                 const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
                 const rank = match ? match.role.rank : 0;
                 const role = interaction.guild.roles.cache.get(b.roleId);
+                
                 if (role) {
-                    if (rank === b.rankId && !member.roles.cache.has(role.id)) { await member.roles.add(role); added.push(role.name); }
-                    else if (rank !== b.rankId && member.roles.cache.has(role.id)) { await member.roles.remove(role); }
+                    if (rank === b.rankId && !member.roles.cache.has(role.id)) { 
+                        await member.roles.add(role); 
+                        added.push(role.name); 
+                    } else if (rank !== b.rankId && member.roles.cache.has(role.id)) { 
+                        await member.roles.remove(role); 
+                    }
                 }
             }
-            return interaction.editReply(`🔄 Sync complete. Added: ${added.join(', ') || 'None'}`);
+
+            // Generate the visual upgrade embed matching the image layout
+            const embed = new EmbedBuilder()
+                .setTitle("Update Complete")
+                .setColor(0x2ECC71) // Sleek green sidebar tint
+                .setThumbnail(interaction.user.displayAvatarURL({ dynamic: true })) // Puts user's Discord profile pic on the right side
+                .addFields(
+                    { name: "User:", value: `<@${interaction.user.id}>`, inline: false },
+                    { name: "Roles Added", value: added.length > 0 ? added.join('\n') : "No new ranks to add.", inline: false }
+                );
+
+            return interaction.editReply({ embeds: [embed] });
         } catch (e) { return interaction.editReply("❌ Update network error."); }
     }
 });
