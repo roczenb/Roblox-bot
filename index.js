@@ -9,7 +9,7 @@ const DB_FILE = '/app/data/bot_data.json';
 let data = { users: {}, groups: {}, binds: {} };
 
 // --- CONFIGURATION ---
-const LC_ROLE_NAME = "LC+"; 
+const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
 
 // --- ANTI-SPAM SYSTEM TRACKING ---
 const cooldowns = new Map();
