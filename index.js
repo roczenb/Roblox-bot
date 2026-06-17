@@ -3,13 +3,21 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages] });
+const client = new Client({ 
+    intents: [
+        GatewayIntentBits.Guilds, 
+        GatewayIntentBits.GuildMembers, 
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ] 
+});
 
 const DB_FILE = '/app/data/bot_data.json';
-let data = { users: {}, groups: {}, binds: {} };
+let data = { users: {}, groups: {}, binds: {}, antimention: {} };
 
 // --- CONFIGURATION ---
 const LC_ROLE_NAME = "LC+"; 
+const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; // Change this to the exact name of the only role allowed to bypass the shield
 
 const cooldowns = new Map();
 let isUpdateAllRunning = false; 
@@ -18,7 +26,10 @@ function loadData() {
     try {
         const dir = path.dirname(DB_FILE);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        if (fs.existsSync(DB_FILE)) data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        if (fs.existsSync(DB_FILE)) {
+            data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+            if (!data.antimention) data.antimention = {};
+        }
     } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
 
@@ -34,8 +45,7 @@ function checkCooldown(userId, commandName, seconds = 5) {
     if (cooldowns.has(key)) {
         const expirationTime = cooldowns.get(key) + (seconds * 1000);
         if (now < expirationTime) {
-            const timeLeft = ((expirationTime - now) / 1000).toFixed(1);
-            return timeLeft;
+            return ((expirationTime - now) / 1000).toFixed(1);
         }
     }
     cooldowns.set(key, now);
@@ -50,7 +60,8 @@ const commands = [
     new SlashCommandBuilder().setName('bind').setDescription('Bind a specific rank to a role').addIntegerOption(o => o.setName('rankid').setDescription('Rank').setRequired(true)).addRoleOption(o => o.setName('role').setDescription('Role').setRequired(true)),
     new SlashCommandBuilder().setName('update').setDescription('Sync ranks in this server').addUserOption(o => o.setName('user').setDescription('Admin Only: Target user to update').setRequired(false)),
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
-    new SlashCommandBuilder().setName('updateall').setDescription('LC+ Only: Update every verified member in the server at once')
+    new SlashCommandBuilder().setName('updateall').setDescription('LC+ Only: Update every verified member in the server at once'),
+    new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle anti-mention spam shield').addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
 ].map(c => c.toJSON());
 
 client.once('clientReady', async () => {
@@ -59,6 +70,31 @@ client.once('clientReady', async () => {
         await new REST({ version: '10' }).setToken(process.env.BOT_TOKEN).put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('Commands deployed!');
     } catch (e) { console.error(e); }
+});
+
+// --- ANTI-MENTION LISTENER (STRICT BYPASS) ---
+client.on('messageCreate', async message => {
+    if (!message.guild || message.author.bot) return;
+
+    const isEnabled = data.antimention ? data.antimention[message.guild.id] : false;
+    if (!isEnabled) return;
+
+    const totalMentions = message.mentions.users.size + message.mentions.roles.size;
+    if (totalMentions > 4) {
+        const hasBypassRole = message.member.roles.cache.some(r => r.name === ANTIMENTION_BYPASS_ROLE);
+        const isAdmin = message.member.permissions.has('Administrator');
+
+        // Only let them pass if they are a full Administrator or have the explicit bypass role
+        if (isAdmin || hasBypassRole) return; 
+        
+        try {
+            await message.delete();
+            const warning = await message.channel.send(`⚠️ <@${message.author.id}>, mass mentions are restricted while the anti-mention shield is active.`);
+            setTimeout(() => warning.delete().catch(() => {}), 5000);
+        } catch (err) {
+            console.log("Failed to handle antimention deletion:", err.message);
+        }
+    }
 });
 
 client.on('interactionCreate', async interaction => {
@@ -89,14 +125,12 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply("✅ Group linked successfully to this server.");
     }
 
-    // --- FIX: AUTOMATIC HIERARCHY CHAIN SORTING ---
     if (commandName === 'sync-group-roles') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
         await interaction.deferReply();
         const gId = data.groups ? data.groups[guildId] : null;
         if (!gId) return interaction.editReply("❌ Run /setup-group first.");
         try {
-            // Fetch roles and sort them ascending so we can create/position them in increasing order
             const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${gId}/roles`)).data.roles
                 .filter(r => r.rank > 0)
                 .sort((a, b) => a.rank - b.rank);
@@ -117,13 +151,10 @@ client.on('interactionCreate', async interaction => {
                 }
                 data.binds[guildId].push({ groupId: gId, rankId: r.rank, roleId: existingRole.id });
                 boundCount++;
-                
                 trackingList.push({ role: existingRole, rank: r.rank });
             }
             saveData();
 
-            // Sort positions: higher Roblox rank = higher Discord position index
-            // We set positions starting from position 1 up to the top of our group roles array
             try {
                 const positions = trackingList.map((item, index) => ({
                     role: item.role.id,
@@ -131,7 +162,7 @@ client.on('interactionCreate', async interaction => {
                 }));
                 await interaction.guild.roles.setPositions(positions);
             } catch (posError) {
-                console.log("Hierarchy sorting note: Put the bot's own role higher up in Server Settings so it can sort roles above regular members.");
+                console.log("Hierarchy configuration placement update note.");
             }
 
             return interaction.editReply(`🎉 **Sync complete!** Processed **${boundCount}** ranks.\n\n📈 All group roles have been automatically reordered to match your Roblox Chain of Command!`);
@@ -156,9 +187,7 @@ client.on('interactionCreate', async interaction => {
         const serverBinds = data.binds ? data.binds[guildId] : [];
         if (!serverBinds || !serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
 
-        // Sort them dynamically in the list view so higher rank numbers display at the top
         const sortedBinds = [...serverBinds].sort((a, b) => b.rankId - a.rankId);
-
         let bindList = [];
         for (const b of sortedBinds) {
             bindList.push(`• **Rank ${b.rankId}** → <@&${b.roleId}>`);
@@ -214,66 +243,4 @@ client.on('interactionCreate', async interaction => {
                 .setThumbnail(targetUser.displayAvatarURL({ dynamic: true })) 
                 .addFields(
                     { name: "User:", value: `<@${targetUser.id}>`, inline: false },
-                    { name: "Roles Added", value: added.length > 0 ? added.join('\n') : "No new ranks to add.", inline: false }
-                );
-            return interaction.editReply({ embeds: [embed] });
-        } catch (e) { return interaction.editReply("❌ Update network error."); }
-    }
-
-    if (commandName === 'updateall') {
-        const hasLcRole = member.roles.cache.some(r => r.name === LC_ROLE_NAME);
-        const isAdmin = member.permissions.has('Administrator');
-        
-        if (!hasLcRole && !isAdmin) {
-            return interaction.reply({ content: `❌ You must have the **${LC_ROLE_NAME}** role or Administrator permissions to run this.`, ephemeral: true });
-        }
-
-        if (isUpdateAllRunning) {
-            return interaction.reply({ content: "⚠️ A global server data sync is already running right now. Please wait for it to finish!", ephemeral: true });
-        }
-
-        await interaction.deferReply();
-        const serverBinds = data.binds ? data.binds[guildId] : [];
-        if (!serverBinds || !serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
-
-        try {
-            isUpdateAllRunning = true; 
-            const allMembers = await interaction.guild.members.fetch();
-            let processCount = 0;
-
-            for (const [id, targetMember] of allMembers) {
-                if (targetMember.user.bot) continue;
-                const robloxId = data.users[id];
-                if (!robloxId) continue; 
-
-                try {
-                    const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
-                    processCount++;
-
-                    for (const b of serverBinds) {
-                        const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
-                        const rank = match ? match.role.rank : 0;
-                        const role = interaction.guild.roles.cache.get(b.roleId);
-                        
-                        if (role) {
-                            if (rank === b.rankId && !targetMember.roles.cache.has(role.id)) { 
-                                await targetMember.roles.add(role); 
-                            } else if (rank !== b.rankId && targetMember.roles.cache.has(role.id)) { 
-                                await targetMember.roles.remove(role); 
-                            }
-                        }
-                    }
-                    await new Promise(resolve => setTimeout(resolve, 350));
-                } catch (memberErr) { console.log(`Skipped checking member ID ${id} due to API limit rate.`); }
-            }
-
-            isUpdateAllRunning = false; 
-            return interaction.editReply(`🔄 **Bulk Update Complete!** Successfully synced ranks for all **${processCount}** verified users on this server.`);
-        } catch (e) { 
-            isUpdateAllRunning = false; 
-            return interaction.editReply(`❌ Bulk sync encountered a structural error: ${e.message}`); 
-        }
-    }
-});
-
-client.login(process.env.BOT_TOKEN);
+                    { name: "Roles Added", value: added.length > 0 ? added.join
