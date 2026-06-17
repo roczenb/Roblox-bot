@@ -16,7 +16,7 @@ const DB_FILE = '/app/data/bot_data.json';
 let data = { users: {}, groups: {}, binds: {}, antimention: {} };
 
 // --- CONFIGURATION ---
-const LC_ROLE_NAME = "LC+"; 
+const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
 const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; // Change this to the exact name of the only role allowed to bypass the shield
 
 const cooldowns = new Map();
