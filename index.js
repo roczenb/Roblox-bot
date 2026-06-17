@@ -54,6 +54,17 @@ function checkCooldown(userId, commandName, seconds = 5) {
     return null;
 }
 
+// Map for text coloring formatting (ANSI Sequences)
+const TEXT_COLORS = {
+    'red': '\u001b[31m',
+    'green': '\u001b[32m',
+    'yellow': '\u001b[33m',
+    'blue': '\u001b[34m',
+    'magenta': '\u001b[35m',
+    'cyan': '\u001b[36m',
+    'white': '\u001b[37m'
+};
+
 const commands = [
     new SlashCommandBuilder().setName('verify').setDescription('Link your Roblox account globally').addStringOption(o => o.setName('username').setDescription('Username').setRequired(true)),
     new SlashCommandBuilder().setName('setup-group').setDescription('Link a Roblox Group ID to this server').addStringOption(o => o.setName('groupid').setDescription('Group ID').setRequired(true)),
@@ -67,12 +78,20 @@ const commands = [
         .addUserOption(o => o.setName('protect-user').setDescription('Nuke messages that mention this specific user').setRequired(false))
         .addRoleOption(o => o.setName('protect-role').setDescription('Nuke messages that mention this specific role').setRequired(false)),
     new SlashCommandBuilder().setName('embed-create').setDescription('Admin Only: Create a custom embed message')
-        .addStringOption(o => o.setName('color').setDescription('Hex Code code color (ex: #FF0000 for Red)').setRequired(false)),
+        .addStringOption(o => o.setName('text-color').setDescription('Color of the description text').setRequired(false)
+            .addChoices(
+                { name: 'Red', value: 'red' },
+                { name: 'Green', value: 'green' },
+                { name: 'Yellow', value: 'yellow' },
+                { name: 'Blue', value: 'blue' },
+                { name: 'Magenta', value: 'magenta' },
+                { name: 'Cyan', value: 'cyan' },
+                { name: 'White', value: 'white' }
+            )),
     new SlashCommandBuilder().setName('embed-edit').setDescription('Admin Only: Modify an existing bot embed')
         .addStringOption(o => o.setName('message-id').setDescription('The ID of the bot message containing the embed').setRequired(true))
 ].map(c => c.toJSON());
 
-// --- FIXES DUPLICATE COMMANDS ON STARTUP ---
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
@@ -365,12 +384,13 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply(responseMsg);
         }
 
+        // --- EMBED CREATE WITH TEXT COLOR OPTIONS ---
         if (commandName === 'embed-create') {
             if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", ephemeral: true });
             
-            const chosenColor = options.getString('color') || '#3498DB';
+            const chosenTextColor = options.getString('text-color') || 'white';
 
-            const modal = new ModalBuilder().setCustomId(`embed_create_modal_${chosenColor}`).setTitle('Create Custom Embed');
+            const modal = new ModalBuilder().setCustomId(`embed_create_modal_${chosenTextColor}`).setTitle('Create Custom Embed');
             const titleInput = new TextInputBuilder().setCustomId('embed_title').setLabel('Embed Title').setStyle(TextInputStyle.Short).setRequired(true);
             const descInput = new TextInputBuilder().setCustomId('embed_desc').setLabel('Embed Description').setStyle(TextInputStyle.Paragraph).setRequired(true);
 
@@ -378,25 +398,32 @@ client.on('interactionCreate', async interaction => {
             return await interaction.showModal(modal);
         }
 
+        // --- EMBED EDIT WITH SAVED BLOCKS ---
         if (commandName === 'embed-edit') {
             if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", ephemeral: true });
             
             const msgId = options.getString('message-id');
             try {
                 const targetMsg = await channel.messages.fetch(msgId);
-                if (targetMsg.author.id !== client.user.id) return interaction.reply({ content: "❌ I can only edit embeds that were sent by this bot profile.", ephemeral: true });
+                if (targetMsg.author.id !== client.user.id) return interaction.reply({ content: "❌ I can only edit embeds sent by this bot profile.", ephemeral: true });
                 if (!targetMsg.embeds.length) return interaction.reply({ content: "❌ That targeted message does not contain a valid embed.", ephemeral: true });
 
                 const currentEmbed = targetMsg.embeds[0];
                 const modal = new ModalBuilder().setCustomId(`embed_edit_modal_${msgId}`).setTitle('Edit Existing Embed');
                 
+                // Clean up any internal ANSI color codes if we are editing an already colored description
+                let cleanDescription = currentEmbed.description || '';
+                if (cleanDescription.startsWith('```ansi\n')) {
+                    cleanDescription = cleanDescription.replace(/^```ansi\n\u001b\[\d+m/, '').replace(/\n```$/, '');
+                }
+
                 const titleInput = new TextInputBuilder().setCustomId('embed_title').setLabel('Embed Title').setStyle(TextInputStyle.Short).setValue(currentEmbed.title || '').setRequired(true);
-                const descInput = new TextInputBuilder().setCustomId('embed_desc').setLabel('Embed Description').setStyle(TextInputStyle.Paragraph).setValue(currentEmbed.description || '').setRequired(true);
+                const descInput = new TextInputBuilder().setCustomId('embed_desc').setLabel('Embed Description').setStyle(TextInputStyle.Paragraph).setValue(cleanDescription).setRequired(true);
 
                 modal.addComponents(new ActionRowBuilder().addComponents(titleInput), new ActionRowBuilder().addComponents(descInput));
                 return await interaction.showModal(modal);
             } catch (err) {
-                return interaction.reply({ content: "❌ Message not found. Make sure you run this command in the exact same channel the message is in.", ephemeral: true });
+                return interaction.reply({ content: "❌ Message not found. Make sure you run this command in the exact same channel.", ephemeral: true });
             }
         }
     }
@@ -406,17 +433,21 @@ client.on('interactionCreate', async interaction => {
 
         if (customId.startsWith('embed_create_modal_')) {
             await interaction.deferReply({ ephemeral: true });
-            const colorHex = customId.replace('embed_create_modal_', '');
+            const textColorName = customId.replace('embed_create_modal_', '');
             const title = fields.getTextInputValue('embed_title');
             const description = fields.getTextInputValue('embed_desc');
 
+            // Wrap description using the selected ANSI code injection block
+            const ansiPrefix = TEXT_COLORS[textColorName] || TEXT_COLORS['white'];
+            const finalizedDescription = ````ansi\n${ansiPrefix}${description}\n````;
+
             const newEmbed = new EmbedBuilder()
                 .setTitle(title)
-                .setDescription(description)
-                .setColor(colorHex.startsWith('#') ? colorHex : `#${colorHex}`);
+                .setDescription(finalizedDescription)
+                .setColor('#2B2D31'); // Neutral dark sidebar to emphasize text color block
 
             await channel.send({ embeds: [newEmbed] });
-            return interaction.editReply("✅ Embed sent successfully!");
+            return interaction.editReply("✅ Colored text embed sent successfully!");
         }
 
         if (customId.startsWith('embed_edit_modal_')) {
@@ -429,12 +460,23 @@ client.on('interactionCreate', async interaction => {
                 const targetMsg = await channel.messages.fetch(msgId);
                 const oldEmbed = targetMsg.embeds[0];
                 
+                // Retain old color if any, or wrap with standard layout
+                let updatedDescription = description;
+                let matchedPrefix = '\u001b[37m'; 
+
+                if (oldEmbed.description && oldEmbed.description.startsWith('```ansi\n')) {
+                    const match = oldEmbed.description.match(/^```ansi\n(\u001b\[\d+m)/);
+                    if (match) matchedPrefix = match[1];
+                }
+                
+                updatedDescription = ````ansi\n${matchedPrefix}${description}\n````;
+
                 const editedEmbed = EmbedBuilder.from(oldEmbed)
                     .setTitle(title)
-                    .setDescription(description);
+                    .setDescription(updatedDescription);
 
                 await targetMsg.edit({ embeds: [editedEmbed] });
-                return interaction.editReply("✅ Embed modified successfully!");
+                return interaction.editReply("✅ Embed text updated successfully!");
             } catch (err) {
                 return interaction.editReply("❌ Failed to modify embed data.");
             }
