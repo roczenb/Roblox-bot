@@ -64,15 +64,19 @@ const commands = [
     new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle anti-mention spam shield').addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
 ].map(c => c.toJSON());
 
-client.once('clientReady', async () => {
+// --- FIXED EVENT NAME HERE FROM clientReady TO ready ---
+client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
-        await new REST({ version: '10' }).setToken(process.env.BOT_TOKEN).put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('Commands deployed!');
+        await new REST({ version: '10' }).setToken(process.env.BOT_TOKEN).put(
+            Routes.applicationCommands(client.user.id), 
+            { body: commands }
+        );
+        console.log('Commands successfully deployed to Discord!');
     } catch (e) { console.error(e); }
 });
 
-// --- ANTI-MENTION LISTENER (STRICT BYPASS) ---
+// --- ANTI-MENTION LISTENER ---
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
@@ -84,7 +88,6 @@ client.on('messageCreate', async message => {
         const hasBypassRole = message.member.roles.cache.some(r => r.name === ANTIMENTION_BYPASS_ROLE);
         const isAdmin = message.member.permissions.has('Administrator');
 
-        // Only let them pass if they are a full Administrator or have the explicit bypass role
         if (isAdmin || hasBypassRole) return; 
         
         try {
