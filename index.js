@@ -17,7 +17,7 @@ let data = { users: {}, groups: {}, binds: {}, antimention: {} };
 
 // --- CONFIGURATION ---
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
-const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; // Change this to the exact name of the only role allowed to bypass the shield
+const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; // Change this to the exact name of your bypass role
 
 const cooldowns = new Map();
 let isUpdateAllRunning = false; 
@@ -64,16 +64,25 @@ const commands = [
     new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle anti-mention spam shield').addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
 ].map(c => c.toJSON());
 
-// --- FIXED EVENT NAME HERE FROM clientReady TO ready ---
+// --- MODIFIED: INSTANT GUILD COMMAND DEPLOYMENT RUNNER ---
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
-        await new REST({ version: '10' }).setToken(process.env.BOT_TOKEN).put(
-            Routes.applicationCommands(client.user.id), 
-            { body: commands }
-        );
-        console.log('Commands successfully deployed to Discord!');
-    } catch (e) { console.error(e); }
+        const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
+        
+        // Fetch all guilds the bot is currently serving
+        const guilds = await client.guilds.fetch();
+        
+        // Loop through each guild to instantly force deploy the new command structural array
+        for (const [guildId] of guilds) {
+            await rest.put(
+                Routes.applicationGuildCommands(client.user.id, guildId), 
+                { body: commands }
+            );
+            console.log(`Commands instantly pushed to Server ID: ${guildId}`);
+        }
+        console.log('All slash commands are live and ready!');
+    } catch (e) { console.error('Command registration failed:', e); }
 });
 
 // --- ANTI-MENTION LISTENER ---
