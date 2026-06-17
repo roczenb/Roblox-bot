@@ -1,15 +1,15 @@
 {
-  "name": "roblox-advanced-bot",
+  "name": "roblox-discord-bot",
   "version": "1.0.0",
-  "description": "Advanced Roblox Verification and Bind Bot",
+  "description": "Roblox ranking bot with permanent local volume storage",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "install": "npm install --omit=dev"
   },
   "dependencies": {
-    "axios": "^1.18.0",
-    "discord.js": "^14.26.4",
-    "mongoose": "^8.0.0"
-  },
-  "type": "commonjs"
+    "axios": "^1.7.2",
+    "discord.js": "^14.15.3",
+    "mongoose": "^8.4.1"
+  }
 }
