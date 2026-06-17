@@ -13,7 +13,7 @@ const client = new Client({
 });
 
 const DB_FILE = '/app/data/bot_data.json';
-let data = { users: {}, groups: {}, binds: {}, antimention: {} };
+let data = { users: {}, groups: {}, binds: {}, antimention: {}, protectedTargets: {} };
 
 // --- CONFIGURATION ---
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
@@ -29,6 +29,7 @@ function loadData() {
         if (fs.existsSync(DB_FILE)) {
             data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
             if (!data.antimention) data.antimention = {};
+            if (!data.protectedTargets) data.protectedTargets = {};
         }
     } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
@@ -61,7 +62,10 @@ const commands = [
     new SlashCommandBuilder().setName('update').setDescription('Sync ranks in this server').addUserOption(o => o.setName('user').setDescription('Admin Only: Target user to update').setRequired(false)),
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
     new SlashCommandBuilder().setName('updateall').setDescription('LC+ Only: Update every verified member in the server at once'),
-    new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle anti-mention spam shield').addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
+    new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle shield settings')
+        .addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
+        .addUserOption(o => o.setName('protect-user').setDescription('Nuke messages that mention this specific user').setRequired(false))
+        .addRoleOption(o => o.setName('protect-role').setDescription('Nuke messages that mention this specific role').setRequired(false))
 ].map(c => c.toJSON());
 
 // --- FIXES DUPLICATE COMMANDS ON STARTUP ---
@@ -69,41 +73,56 @@ client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
         const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-        
-        // FIX: This clears out the old global command list that is causing the duplicates
         await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
-        console.log('Old global command cache cleared successfully.');
-
+        
         const guilds = await client.guilds.fetch();
         for (const [guildId] of guilds) {
-            // Wipe the server command cache clean
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: [] });
-            
-            // Re-inject the master list cleanly
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
-            console.log(`Clean commands pushed to Server ID: ${guildId}`);
         }
         console.log('All slash commands are synced with zero duplicates!');
     } catch (e) { console.error('Command registration failed:', e); }
 });
 
-// --- ANTI-MENTION LISTENER ---
+// --- ENHANCED ANTI-MENTION LISTENER ---
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
     const isEnabled = data.antimention ? data.antimention[message.guild.id] : false;
     if (!isEnabled) return;
 
-    const totalMentions = message.mentions.users.size + message.mentions.roles.size;
-    if (totalMentions > 4) {
-        const hasBypassRole = message.member.roles.cache.some(r => r.name === ANTIMENTION_BYPASS_ROLE);
-        const isAdmin = message.member.permissions.has('Administrator');
+    // Check permissions first to save processing time
+    const hasBypassRole = message.member.roles.cache.some(r => r.name === ANTIMENTION_BYPASS_ROLE);
+    const isAdmin = message.member.permissions.has('Administrator');
+    if (isAdmin || hasBypassRole) return; 
 
-        if (isAdmin || hasBypassRole) return; 
-        
+    const totalMentions = message.mentions.users.size + message.mentions.roles.size;
+    
+    // Check for target protection configuration
+    const targetConfig = data.protectedTargets ? data.protectedTargets[message.guild.id] : null;
+    let triggeredProtection = false;
+    let protectionReason = "";
+
+    if (targetConfig) {
+        if (targetConfig.userId && message.mentions.users.has(targetConfig.userId)) {
+            triggeredProtection = true;
+            protectionReason = `pings to <@${targetConfig.userId}> are strictly forbidden`;
+        }
+        if (targetConfig.roleId && message.mentions.roles.has(targetConfig.roleId)) {
+            triggeredProtection = true;
+            protectionReason = `pings to <@&${targetConfig.roleId}> are strictly forbidden`;
+        }
+    }
+
+    // Triggered if overall spam (>4 pings) OR if they hit our exact protected target
+    if (totalMentions > 4 || triggeredProtection) {
+        if (!protectionReason) {
+            protectionReason = "mass mentions are restricted while the anti-mention shield is active";
+        }
+
         try {
             await message.delete();
-            const warning = await message.channel.send(`⚠️ <@${message.author.id}>, mass mentions are restricted while the anti-mention shield is active.`);
+            const warning = await message.channel.send(`⚠️ <@${message.author.id}>, ${protectionReason}.`);
             setTimeout(() => warning.delete().catch(() => {}), 5000);
         } catch (err) {
             console.log("Failed to handle antimention deletion:", err.message);
@@ -324,12 +343,29 @@ client.on('interactionCreate', async interaction => {
         if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", ephemeral: true });
         
         const enabledSetting = options.getBoolean('enabled');
+        const protectedUser = options.getUser('protect-user');
+        const protectedRole = options.getRole('protect-role');
+
         if (!data.antimention) data.antimention = {};
+        if (!data.protectedTargets) data.protectedTargets = {};
         
         data.antimention[guildId] = enabledSetting;
+        
+        // Save the protected IDs if provided, or clear them out if left blank
+        data.protectedTargets[guildId] = {
+            userId: protectedUser ? protectedUser.id : null,
+            roleId: protectedRole ? protectedRole.id : null
+        };
+        
         saveData();
 
-        return interaction.reply(`Shield state modified. Anti-mention protection is now **${enabledSetting ? "ENABLED" : "DISABLED"}** on this server.`);
+        let responseMsg = `Shield status: **${enabledSetting ? "ENABLED" : "DISABLED"}**.`;
+        if (enabledSetting) {
+            if (protectedUser) responseMsg += `\n🔒 Protected User: <@${protectedUser.id}>`;
+            if (protectedRole) responseMsg += `\n🔒 Protected Role: <@&${protectedRole.id}>`;
+        }
+
+        return interaction.reply(responseMsg);
     }
 });
 
