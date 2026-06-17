@@ -16,8 +16,8 @@ const DB_FILE = '/app/data/bot_data.json';
 let data = { users: {}, groups: {}, binds: {}, antimention: {} };
 
 // --- CONFIGURATION ---
-const LC_ROLE_NAME = "LC+"; 
-const ANTIMENTION_BYPASS_ROLE = "Bypass Role"; // Change this to your exact bypass role name
+const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
+const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; // Change this to your exact bypass role name
 
 const cooldowns = new Map();
 let isUpdateAllRunning = false; 
