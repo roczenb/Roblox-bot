@@ -243,4 +243,78 @@ client.on('interactionCreate', async interaction => {
                 .setThumbnail(targetUser.displayAvatarURL({ dynamic: true })) 
                 .addFields(
                     { name: "User:", value: `<@${targetUser.id}>`, inline: false },
-                    { name: "Roles Added", value: added.length > 0 ? added.join
+                    { name: "Roles Added", value: added.length > 0 ? added.join('\n') : "No new ranks to add.", inline: false }
+                );
+            return interaction.editReply({ embeds: [embed] });
+        } catch (e) { return interaction.editReply("❌ Update network error."); }
+    }
+
+    if (commandName === 'updateall') {
+        const hasLcRole = member.roles.cache.some(r => r.name === LC_ROLE_NAME);
+        const isAdmin = member.permissions.has('Administrator');
+        
+        if (!hasLcRole && !isAdmin) {
+            return interaction.reply({ content: `❌ You must have the **${LC_ROLE_NAME}** role or Administrator permissions to run this.`, ephemeral: true });
+        }
+
+        if (isUpdateAllRunning) {
+            return interaction.reply({ content: "⚠️ A global server data sync is already running right now. Please wait for it to finish!", ephemeral: true });
+        }
+
+        await interaction.deferReply();
+        const serverBinds = data.binds ? data.binds[guildId] : [];
+        if (!serverBinds || !serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
+
+        try {
+            isUpdateAllRunning = true; 
+            const allMembers = await interaction.guild.members.fetch();
+            let processCount = 0;
+
+            for (const [id, targetMember] of allMembers) {
+                if (targetMember.user.bot) continue;
+                const robloxId = data.users[id];
+                if (!robloxId) continue; 
+
+                try {
+                    const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
+                    processCount++;
+
+                    for (const b of serverBinds) {
+                        const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
+                        const rank = match ? match.role.rank : 0;
+                        const role = interaction.guild.roles.cache.get(b.roleId);
+                        
+                        if (role) {
+                            if (rank === b.rankId && !targetMember.roles.cache.has(role.id)) { 
+                                await targetMember.roles.add(role); 
+                            } else if (rank !== b.rankId && targetMember.roles.cache.has(role.id)) { 
+                                await targetMember.roles.remove(role); 
+                            }
+                        }
+                    }
+                    await new Promise(resolve => setTimeout(resolve, 350));
+                } catch (memberErr) { console.log(`Skipped checking member ID ${id}`); }
+            }
+
+            isUpdateAllRunning = false; 
+            return interaction.editReply(`🔄 **Bulk Update Complete!** Successfully synced ranks for all **${processCount}** verified users.`);
+        } catch (e) { 
+            isUpdateAllRunning = false; 
+            return interaction.editReply(`❌ Bulk sync error: ${e.message}`); 
+        }
+    }
+
+    if (commandName === 'antimention') {
+        if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", ephemeral: true });
+        
+        const enabledSetting = options.getBoolean('enabled');
+        if (!data.antimention) data.antimention = {};
+        
+        data.antimention[guildId] = enabledSetting;
+        saveData();
+
+        return interaction.reply(`Shield state modified. Anti-mention protection is now **${enabledSetting ? "ENABLED" : "DISABLED"}** on this server.`);
+    }
+});
+
+client.login(process.env.BOT_TOKEN);
