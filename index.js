@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, REST, Routes, SlashCommandBuilder, EmbedBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, MessageFlags } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -156,7 +156,7 @@ client.on('interactionCreate', async interaction => {
 
         if (commandName === 'verify') {
             const wait = checkCooldown(interaction.user.id, commandName, 5);
-            if (wait) return interaction.reply({ content: `⏳ Please wait **${wait}s** before trying to verify again.`, ephemeral: true });
+            if (wait) return interaction.reply({ content: `⏳ Please wait **${wait}s** before trying to verify again.`, flags: [MessageFlags.Ephemeral] });
 
             await interaction.deferReply();
             try {
@@ -257,7 +257,7 @@ client.on('interactionCreate', async interaction => {
 
         if (commandName === 'update') {
             const wait = checkCooldown(interaction.user.id, commandName, 7);
-            if (wait) return interaction.reply({ content: `⏳ Please wait **${wait}s** before requesting another profile update.`, ephemeral: true });
+            if (wait) return interaction.reply({ content: `⏳ Please wait **${wait}s** before requesting another profile update.`, flags: [MessageFlags.Ephemeral] });
 
             await interaction.deferReply();
             const targetUser = options.getUser('user') || interaction.user;
@@ -308,11 +308,11 @@ client.on('interactionCreate', async interaction => {
             const isAdmin = member.permissions.has('Administrator');
             
             if (!hasLcRole && !isAdmin) {
-                return interaction.reply({ content: `❌ You must have the **${LC_ROLE_NAME}** role or Administrator permissions to run this.`, ephemeral: true });
+                return interaction.reply({ content: `❌ You must have the **${LC_ROLE_NAME}** role or Administrator permissions to run this.`, flags: [MessageFlags.Ephemeral] });
             }
 
             if (isUpdateAllRunning) {
-                return interaction.reply({ content: "⚠️ A global server data sync is already running right now. Please wait for it to finish!", ephemeral: true });
+                return interaction.reply({ content: "⚠️ A global server data sync is already running right now. Please wait for it to finish!", flags: [MessageFlags.Ephemeral] });
             }
 
             await interaction.deferReply();
@@ -359,7 +359,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (commandName === 'antimention') {
-            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", ephemeral: true });
+            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
             
             const enabledSetting = options.getBoolean('enabled');
             const protectedUser = options.getUser('protect-user');
@@ -384,9 +384,8 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply(responseMsg);
         }
 
-        // --- EMBED CREATE WITH TEXT COLOR OPTIONS ---
         if (commandName === 'embed-create') {
-            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", ephemeral: true });
+            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
             
             const chosenTextColor = options.getString('text-color') || 'white';
 
@@ -398,20 +397,18 @@ client.on('interactionCreate', async interaction => {
             return await interaction.showModal(modal);
         }
 
-        // --- EMBED EDIT WITH SAVED BLOCKS ---
         if (commandName === 'embed-edit') {
-            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", ephemeral: true });
+            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
             
             const msgId = options.getString('message-id');
             try {
                 const targetMsg = await channel.messages.fetch(msgId);
-                if (targetMsg.author.id !== client.user.id) return interaction.reply({ content: "❌ I can only edit embeds sent by this bot profile.", ephemeral: true });
-                if (!targetMsg.embeds.length) return interaction.reply({ content: "❌ That targeted message does not contain a valid embed.", ephemeral: true });
+                if (targetMsg.author.id !== client.user.id) return interaction.reply({ content: "❌ I can only edit embeds sent by this bot profile.", flags: [MessageFlags.Ephemeral] });
+                if (!targetMsg.embeds.length) return interaction.reply({ content: "❌ That targeted message does not contain a valid embed.", flags: [MessageFlags.Ephemeral] });
 
                 const currentEmbed = targetMsg.embeds[0];
                 const modal = new ModalBuilder().setCustomId(`embed_edit_modal_${msgId}`).setTitle('Edit Existing Embed');
                 
-                // Clean up any internal ANSI color codes if we are editing an already colored description
                 let cleanDescription = currentEmbed.description || '';
                 if (cleanDescription.startsWith('```ansi\n')) {
                     cleanDescription = cleanDescription.replace(/^```ansi\n\u001b\[\d+m/, '').replace(/\n```$/, '');
@@ -423,7 +420,7 @@ client.on('interactionCreate', async interaction => {
                 modal.addComponents(new ActionRowBuilder().addComponents(titleInput), new ActionRowBuilder().addComponents(descInput));
                 return await interaction.showModal(modal);
             } catch (err) {
-                return interaction.reply({ content: "❌ Message not found. Make sure you run this command in the exact same channel.", ephemeral: true });
+                return interaction.reply({ content: "❌ Message not found. Make sure you run this command in the exact same channel.", flags: [MessageFlags.Ephemeral] });
             }
         }
     }
@@ -432,26 +429,25 @@ client.on('interactionCreate', async interaction => {
         const { customId, fields, channel } = interaction;
 
         if (customId.startsWith('embed_create_modal_')) {
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
             const textColorName = customId.replace('embed_create_modal_', '');
             const title = fields.getTextInputValue('embed_title');
             const description = fields.getTextInputValue('embed_desc');
 
-            // Wrap description using the selected ANSI code injection block
             const ansiPrefix = TEXT_COLORS[textColorName] || TEXT_COLORS['white'];
-            const finalizedDescription = ````ansi\n${ansiPrefix}${description}\n````;
+            const finalizedDescription = `\`\`\`ansi\n${ansiPrefix}${description}\n\`\`\``;
 
             const newEmbed = new EmbedBuilder()
                 .setTitle(title)
                 .setDescription(finalizedDescription)
-                .setColor('#2B2D31'); // Neutral dark sidebar to emphasize text color block
+                .setColor('#2B2D31'); 
 
             await channel.send({ embeds: [newEmbed] });
             return interaction.editReply("✅ Colored text embed sent successfully!");
         }
 
         if (customId.startsWith('embed_edit_modal_')) {
-            await interaction.deferReply({ ephemeral: true });
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
             const msgId = customId.replace('embed_edit_modal_', '');
             const title = fields.getTextInputValue('embed_title');
             const description = fields.getTextInputValue('embed_desc');
@@ -460,7 +456,6 @@ client.on('interactionCreate', async interaction => {
                 const targetMsg = await channel.messages.fetch(msgId);
                 const oldEmbed = targetMsg.embeds[0];
                 
-                // Retain old color if any, or wrap with standard layout
                 let updatedDescription = description;
                 let matchedPrefix = '\u001b[37m'; 
 
@@ -469,7 +464,7 @@ client.on('interactionCreate', async interaction => {
                     if (match) matchedPrefix = match[1];
                 }
                 
-                updatedDescription = ````ansi\n${matchedPrefix}${description}\n````;
+                updatedDescription = `\`\`\`ansi\n${matchedPrefix}${description}\n\`\`\``;
 
                 const editedEmbed = EmbedBuilder.from(oldEmbed)
                     .setTitle(title)
