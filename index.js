@@ -16,8 +16,8 @@ const DB_FILE = '/app/data/bot_data.json';
 let data = { users: {}, groups: {}, binds: {}, antimention: {} };
 
 // --- CONFIGURATION ---
-const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
-const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; // Change this to the exact name of your bypass role
+const LC_ROLE_NAME = "LC+"; 
+const ANTIMENTION_BYPASS_ROLE = "Bypass Role"; // Change this to the exact name of your bypass role
 
 const cooldowns = new Map();
 let isUpdateAllRunning = false; 
@@ -64,6 +64,7 @@ const commands = [
     new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle anti-mention spam shield').addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
 ].map(c => c.toJSON());
 
+// --- FORCE RESET & INSTANT DEPLOYMENT RUNNER ---
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
@@ -71,16 +72,13 @@ client.once('ready', async () => {
         const guilds = await client.guilds.fetch();
         
         for (const [guildId] of guilds) {
-            // STEP 1: Wipe any corrupt/old command cache for this server completely clear
+            // Wipe any corrupted, stuck, or old slash command indexes clean from the server
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: [] });
             
-            // STEP 2: Inject the clean, updated command array back in
+            // Re-inject the modern array instantly
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
             console.log(`Commands totally reset and pushed to Server ID: ${guildId}`);
         }
-        console.log('All slash commands are live and ready!');
-    } catch (e) { console.error('Command registration failed:', e); }
-});
         console.log('All slash commands are live and ready!');
     } catch (e) { console.error('Command registration failed:', e); }
 });
@@ -97,6 +95,7 @@ client.on('messageCreate', async message => {
         const hasBypassRole = message.member.roles.cache.some(r => r.name === ANTIMENTION_BYPASS_ROLE);
         const isAdmin = message.member.permissions.has('Administrator');
 
+        // Block everyone unless they are an explicit Admin or have the chosen Bypass Role
         if (isAdmin || hasBypassRole) return; 
         
         try {
