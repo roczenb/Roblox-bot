@@ -64,23 +64,23 @@ const commands = [
     new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle anti-mention spam shield').addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
 ].map(c => c.toJSON());
 
-// --- MODIFIED: INSTANT GUILD COMMAND DEPLOYMENT RUNNER ---
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
         const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-        
-        // Fetch all guilds the bot is currently serving
         const guilds = await client.guilds.fetch();
         
-        // Loop through each guild to instantly force deploy the new command structural array
         for (const [guildId] of guilds) {
-            await rest.put(
-                Routes.applicationGuildCommands(client.user.id, guildId), 
-                { body: commands }
-            );
-            console.log(`Commands instantly pushed to Server ID: ${guildId}`);
+            // STEP 1: Wipe any corrupt/old command cache for this server completely clear
+            await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: [] });
+            
+            // STEP 2: Inject the clean, updated command array back in
+            await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
+            console.log(`Commands totally reset and pushed to Server ID: ${guildId}`);
         }
+        console.log('All slash commands are live and ready!');
+    } catch (e) { console.error('Command registration failed:', e); }
+});
         console.log('All slash commands are live and ready!');
     } catch (e) { console.error('Command registration failed:', e); }
 });
