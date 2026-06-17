@@ -9,11 +9,10 @@ const DB_FILE = '/app/data/bot_data.json';
 let data = { users: {}, groups: {}, binds: {} };
 
 // --- CONFIGURATION ---
-const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
+const LC_ROLE_NAME = "LC+"; 
 
-// --- ANTI-SPAM SYSTEM TRACKING ---
 const cooldowns = new Map();
-let isUpdateAllRunning = false; // Prevents multiple bulk updates from stacking concurrently
+let isUpdateAllRunning = false; 
 
 function loadData() {
     try {
@@ -29,7 +28,6 @@ function saveData() {
 
 loadData();
 
-// Helper helper function to enforce individual command cooldowns
 function checkCooldown(userId, commandName, seconds = 5) {
     const key = `${userId}-${commandName}`;
     const now = Date.now();
@@ -48,7 +46,7 @@ function checkCooldown(userId, commandName, seconds = 5) {
 const commands = [
     new SlashCommandBuilder().setName('verify').setDescription('Link your Roblox account globally').addStringOption(o => o.setName('username').setDescription('Username').setRequired(true)),
     new SlashCommandBuilder().setName('setup-group').setDescription('Link a Roblox Group ID to this server').addStringOption(o => o.setName('groupid').setDescription('Group ID').setRequired(true)),
-    new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto create and bind all group roles safely without duplicates'),
+    new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto create and bind roles sorted perfectly by chain of command hierarchy'),
     new SlashCommandBuilder().setName('bind').setDescription('Bind a specific rank to a role').addIntegerOption(o => o.setName('rankid').setDescription('Rank').setRequired(true)).addRoleOption(o => o.setName('role').setDescription('Role').setRequired(true)),
     new SlashCommandBuilder().setName('update').setDescription('Sync ranks in this server').addUserOption(o => o.setName('user').setDescription('Admin Only: Target user to update').setRequired(false)),
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
@@ -91,17 +89,25 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply("✅ Group linked successfully to this server.");
     }
 
+    // --- FIX: AUTOMATIC HIERARCHY CHAIN SORTING ---
     if (commandName === 'sync-group-roles') {
         if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
         await interaction.deferReply();
         const gId = data.groups ? data.groups[guildId] : null;
         if (!gId) return interaction.editReply("❌ Run /setup-group first.");
         try {
-            const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${gId}/roles`)).data.roles.filter(r => r.rank > 0);
+            // Fetch roles and sort them ascending so we can create/position them in increasing order
+            const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${gId}/roles`)).data.roles
+                .filter(r => r.rank > 0)
+                .sort((a, b) => a.rank - b.rank);
+
             let createdCount = 0;
             let boundCount = 0;
             if (!data.binds) data.binds = {};
             if (!data.binds[guildId]) data.binds[guildId] = [];
+
+            const trackingList = [];
+
             for (const r of rRoles) {
                 data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === gId && b.rankId === r.rank));
                 let existingRole = interaction.guild.roles.cache.find(role => role.name === r.name);
@@ -111,9 +117,24 @@ client.on('interactionCreate', async interaction => {
                 }
                 data.binds[guildId].push({ groupId: gId, rankId: r.rank, roleId: existingRole.id });
                 boundCount++;
+                
+                trackingList.push({ role: existingRole, rank: r.rank });
             }
             saveData();
-            return interaction.editReply(`🎉 **Sync complete!** Processed **${boundCount}** ranks. (Created ${createdCount} new roles).`);
+
+            // Sort positions: higher Roblox rank = higher Discord position index
+            // We set positions starting from position 1 up to the top of our group roles array
+            try {
+                const positions = trackingList.map((item, index) => ({
+                    role: item.role.id,
+                    position: index + 1 
+                }));
+                await interaction.guild.roles.setPositions(positions);
+            } catch (posError) {
+                console.log("Hierarchy sorting note: Put the bot's own role higher up in Server Settings so it can sort roles above regular members.");
+            }
+
+            return interaction.editReply(`🎉 **Sync complete!** Processed **${boundCount}** ranks.\n\n📈 All group roles have been automatically reordered to match your Roblox Chain of Command!`);
         } catch (e) { return interaction.editReply(`❌ Sync fail: ${e.message}`); }
     }
 
@@ -135,8 +156,11 @@ client.on('interactionCreate', async interaction => {
         const serverBinds = data.binds ? data.binds[guildId] : [];
         if (!serverBinds || !serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
 
+        // Sort them dynamically in the list view so higher rank numbers display at the top
+        const sortedBinds = [...serverBinds].sort((a, b) => b.rankId - a.rankId);
+
         let bindList = [];
-        for (const b of serverBinds) {
+        for (const b of sortedBinds) {
             bindList.push(`• **Rank ${b.rankId}** → <@&${b.roleId}>`);
         }
 
@@ -149,7 +173,6 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'update') {
-        // Enforce a strict 7-second cooldown per user to prevent API spam abuse
         const wait = checkCooldown(interaction.user.id, commandName, 7);
         if (wait) return interaction.reply({ content: `⏳ Please wait **${wait}s** before requesting another profile update.`, ephemeral: true });
 
@@ -205,7 +228,6 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ content: `❌ You must have the **${LC_ROLE_NAME}** role or Administrator permissions to run this.`, ephemeral: true });
         }
 
-        // ANTI-SPAM PROTECTOR: Check if an updateall sweep is already processing
         if (isUpdateAllRunning) {
             return interaction.reply({ content: "⚠️ A global server data sync is already running right now. Please wait for it to finish!", ephemeral: true });
         }
@@ -215,7 +237,7 @@ client.on('interactionCreate', async interaction => {
         if (!serverBinds || !serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
 
         try {
-            isUpdateAllRunning = true; // Engage lock mechanism
+            isUpdateAllRunning = true; 
             const allMembers = await interaction.guild.members.fetch();
             let processCount = 0;
 
@@ -241,15 +263,14 @@ client.on('interactionCreate', async interaction => {
                             }
                         }
                     }
-                    // Tiny 350ms delay per user prevents RoProxy from getting rate limited
                     await new Promise(resolve => setTimeout(resolve, 350));
                 } catch (memberErr) { console.log(`Skipped checking member ID ${id} due to API limit rate.`); }
             }
 
-            isUpdateAllRunning = false; // Disengage lock mechanism
+            isUpdateAllRunning = false; 
             return interaction.editReply(`🔄 **Bulk Update Complete!** Successfully synced ranks for all **${processCount}** verified users on this server.`);
         } catch (e) { 
-            isUpdateAllRunning = false; // Force unlock if a code error breaks the process
+            isUpdateAllRunning = false; 
             return interaction.editReply(`❌ Bulk sync encountered a structural error: ${e.message}`); 
         }
     }
