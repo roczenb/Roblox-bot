@@ -16,8 +16,8 @@ const DB_FILE = '/app/data/bot_data.json';
 let data = { users: {}, groups: {}, binds: {}, antimention: {} };
 
 // --- CONFIGURATION ---
-const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
-const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; // Change this to your exact bypass role name
+const LC_ROLE_NAME = "LC+"; 
+const ANTIMENTION_BYPASS_ROLE = "Bypass Role"; // Change this to your exact bypass role name
 
 const cooldowns = new Map();
 let isUpdateAllRunning = false; 
@@ -64,22 +64,26 @@ const commands = [
     new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle anti-mention spam shield').addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
 ].map(c => c.toJSON());
 
-// --- REWORKED INSTANT INITIALIZATION LOOP ---
+// --- FIXES DUPLICATE COMMANDS ON STARTUP ---
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     try {
         const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-        const guilds = await client.guilds.fetch();
         
+        // FIX: This clears out the old global command list that is causing the duplicates
+        await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
+        console.log('Old global command cache cleared successfully.');
+
+        const guilds = await client.guilds.fetch();
         for (const [guildId] of guilds) {
-            // Step 1: Wipe the stuck command cache completely clean
+            // Wipe the server command cache clean
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: [] });
             
-            // Step 2: Inject the master array instantly
+            // Re-inject the master list cleanly
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
-            console.log(`Commands totally reset and pushed to Server ID: ${guildId}`);
+            console.log(`Clean commands pushed to Server ID: ${guildId}`);
         }
-        console.log('All slash commands are live and ready!');
+        console.log('All slash commands are synced with zero duplicates!');
     } catch (e) { console.error('Command registration failed:', e); }
 });
 
@@ -151,11 +155,12 @@ client.on('interactionCreate', async interaction => {
             if (!data.binds) data.binds = {};
             if (!data.binds[guildId]) data.binds[guildId] = [];
 
+            const existingRoles = await interaction.guild.roles.fetch();
             const trackingList = [];
 
             for (const r of rRoles) {
                 data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === gId && b.rankId === r.rank));
-                let existingRole = interaction.guild.roles.cache.find(role => role.name === r.name);
+                let existingRole = existingRoles.find(role => role.name === r.name);
                 if (!existingRole) {
                     existingRole = await interaction.guild.roles.create({ name: r.name, reason: 'Auto-sync' });
                     createdCount++;
