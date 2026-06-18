@@ -13,19 +13,9 @@ const {
     ChannelType,
     MessageType
 } = require('discord.js');
-const { 
-    joinVoiceChannel, 
-    createAudioPlayer, 
-    createAudioResource, 
-    AudioPlayerStatus, 
-    getVoiceConnection,
-    StreamType
-} = require('@discordjs/voice');
-const googleTTS = require('google-tts-api');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const ffmpegPath = require('ffmpeg-static'); // Direct pointer to the binary package
 
 const client = new Client({ 
     intents: [
@@ -33,8 +23,7 @@ const client = new Client({
         GatewayIntentBits.GuildMembers, 
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildInvites,
-        GatewayIntentBits.GuildVoiceStates
+        GatewayIntentBits.GuildInvites
     ] 
 });
 
@@ -57,8 +46,6 @@ const cooldowns = new Map();
 const guildInvitesCache = new Map();
 const auditTracking = new Map();
 let isUpdateAllRunning = false; 
-
-const audioPlayers = new Map();
 
 function loadData() {
     try {
@@ -138,10 +125,7 @@ const commands = [
     new SlashCommandBuilder().setName('unmute').setDescription('Admin Only: Lift an active timeout from a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)),
     new SlashCommandBuilder().setName('say').setDescription('Make the bot echo text messages').addStringOption(o => o.setName('text').setDescription('Text message to broadcast').setRequired(true)),
     new SlashCommandBuilder().setName('giveaway').setDescription('Manage community giveaways').addSubcommand(s => s.setName('create').setDescription('Initialize a server giveaway package')),
-    new SlashCommandBuilder().setName('tickets').setDescription('Open or configuration process helper ticket pipelines'),
-    new SlashCommandBuilder().setName('tss').setDescription('Verify terminal synchronization status systems'),
-    new SlashCommandBuilder().setName('tts').setDescription('Send a standard text-to-speech announcement message').addStringOption(o => o.setName('message').setDescription('The content to speak aloud').setRequired(true)),
-    new SlashCommandBuilder().setName('vc-disconnect').setDescription('Force disconnect the bot from the active voice channel connection')
+    new SlashCommandBuilder().setName('tickets').setDescription('Open or configuration process helper ticket pipelines')
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
@@ -246,60 +230,6 @@ client.on('messageCreate', async message => {
     if (message.content.startsWith('?ban') || message.content.startsWith('?kick') || message.content.startsWith('?timeout')) {
         if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
         return message.channel.send(`⚙️ **[SYSTEM OPERATION EXECUTION]**: Target confirmation sequence acknowledged. Preparing background processing data packets...`);
-    }
-
-    // --- AUTOMATED VOICE TEXT-CHAT INTERACTIVE AUDIO STREAM ---
-    const voiceChannel = message.member?.voice?.channel;
-    const isVoiceChat = message.channel.isVoiceBased() || message.channel.type === ChannelType.GuildVoice;
-
-    if (voiceChannel && (isVoiceChat || message.channel.id === voiceChannel.id)) {
-        let connection = getVoiceConnection(message.guild.id);
-        
-        if (!connection || connection.joinConfig.channelId !== voiceChannel.id) {
-            connection = joinVoiceChannel({
-                channelId: voiceChannel.id,
-                guildId: message.guild.id,
-                adapterCreator: message.guild.voiceAdapterCreator,
-                selfMute: false,
-                selfDeaf: false
-            });
-        }
-
-        const speakerName = message.member.displayName || message.author.username;
-        const cleanContent = message.content.replace(/(?:https?|ftp):\/\/[\n\S]+/g, '[link]'); 
-        const speechText = `${speakerName} says: ${cleanContent}`.substring(0, 200);
-
-        try {
-            const url = googleTTS.getAudioUrl(speechText, {
-                lang: 'en',
-                slow: false,
-                host: 'https://translate.google.com',
-                timeout: 10000,
-            });
-
-            let player = audioPlayers.get(message.guild.id);
-            if (!player) {
-                player = createAudioPlayer();
-                audioPlayers.set(message.guild.id, player);
-            }
-            
-            connection.subscribe(player);
-
-            // FORCE PACKETIZATION ROUTING THROUGH EXPLICIT LOCAL FFMPEG BINARY
-            const resource = createAudioResource(url, {
-                inputType: StreamType.Arbitrary,
-                inlineVolume: true,
-                ffmpegPath: ffmpegPath
-            });
-            
-            if (resource.volume) {
-                resource.volume.setVolume(1.0);
-            }
-            
-            player.play(resource);
-        } catch (err) {
-            console.error("Voice Auto-TTS Failure:", err.message);
-        }
     }
 
     // --- ANTI-MENTION PROTECTION LAYER WITH REPLY HOOK EXEMPTION ---
@@ -407,22 +337,6 @@ async function runUpdateProcess(interaction, targetUser) {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel, guild } = interaction;
-
-    if (commandName === 'vc-disconnect') {
-        const connection = getVoiceConnection(guild.id);
-        if (!connection) return interaction.reply({ content: "❌ I am not sitting inside a voice channel.", flags: [MessageFlags.Ephemeral] });
-        connection.destroy();
-        audioPlayers.delete(guild.id);
-        return interaction.reply("👋 Disconnected from voice chat.");
-    }
-
-    if (commandName === 'tts') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.reply({ content: "❌ Administrator validation required.", flags: [MessageFlags.Ephemeral] });
-        }
-        await channel.send({ content: options.getString('message'), tts: true });
-        return interaction.reply({ content: "TTS sent.", flags: [MessageFlags.Ephemeral] });
-    }
 
     if (commandName === 'security-config') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Access Denied.");
