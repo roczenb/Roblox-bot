@@ -244,11 +244,12 @@ client.on('messageCreate', async message => {
         return message.channel.send(`⚙️ **[SYSTEM OPERATION EXECUTION]**: Target confirmation sequence acknowledged. Preparing background processing data packets...`);
     }
 
-    // --- ACCURATE AUTOMATED VOICE TEXT-CHAT TRACKER ---
+    // --- ACCURATE COMPREHENSIVE VOICE TEXT-CHAT CAPTURE ---
     const voiceChannel = message.member?.voice?.channel;
-    
-    // Check if the text message channel matches the voice channel ID the user is in
-    if (voiceChannel && message.channel.id === voiceChannel.id) {
+    const isVoiceChat = message.channel.isVoiceBased() || message.channel.type === ChannelType.GuildVoice;
+
+    // Check if user is in a voice channel AND typing inside that voice channel's chat interface
+    if (voiceChannel && (isVoiceChat || message.channel.id === voiceChannel.id)) {
         let connection = getVoiceConnection(message.guild.id);
         
         if (!connection || connection.joinConfig.channelId !== voiceChannel.id) {
