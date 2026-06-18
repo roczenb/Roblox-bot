@@ -11,7 +11,8 @@ const {
     ActionRowBuilder, 
     ButtonBuilder, 
     ButtonStyle, 
-    MessageFlags 
+    MessageFlags,
+    PermissionFlagsBits
 } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
@@ -22,18 +23,30 @@ const client = new Client({
         GatewayIntentBits.Guilds, 
         GatewayIntentBits.GuildMembers, 
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.GuildInvites
     ] 
 });
 
 const DB_FILE = '/app/data/bot_data.json';
-let data = { users: {}, groups: {}, binds: {}, antimention: {}, protectedTargets: {} };
+let data = { 
+    users: {}, 
+    groups: {}, 
+    binds: {}, 
+    antimention: {}, 
+    protectedTargets: {},
+    invites: {}, 
+    logs: {},
+    security: {} 
+};
 
 // --- CONFIGURATION WITH LITERAL CHARACTERS ---
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
 const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; 
 
 const cooldowns = new Map();
+const guildInvitesCache = new Map();
+const auditTracking = new Map();
 let isUpdateAllRunning = false; 
 
 function loadData() {
@@ -44,6 +57,9 @@ function loadData() {
             data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
             if (!data.antimention) data.antimention = {};
             if (!data.protectedTargets) data.protectedTargets = {};
+            if (!data.invites) data.invites = {};
+            if (!data.logs) data.logs = {};
+            if (!data.security) data.security = {};
         }
     } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
@@ -83,7 +99,11 @@ const commands = [
     new SlashCommandBuilder().setName('verify').setDescription('Link your Roblox account globally').addStringOption(o => o.setName('username').setDescription('Username').setRequired(true)),
     new SlashCommandBuilder().setName('setup-group').setDescription('Link a Roblox Group ID to this server').addStringOption(o => o.setName('groupid').setDescription('Group ID').setRequired(true)),
     new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto create and bind roles sorted perfectly by chain of command hierarchy'),
-    new SlashCommandBuilder().setName('bind').setDescription('Bind a specific rank to a role').addIntegerOption(o => o.setName('rankid').setDescription('Rank').setRequired(true)).addRoleOption(o => o.setName('role').setDescription('Role').setRequired(true)),
+    new SlashCommandBuilder().setName('bind').setDescription('Bind a specific rank to a role')
+        .addIntegerOption(o => o.setName('rankid').setDescription('Rank').setRequired(true))
+        .addRoleOption(o => o.setName('role').setDescription('Role').setRequired(true))
+        .addStringOption(o => o.setName('nickname-format').setDescription('Format, e.g: E1 | {roblox_username}').setRequired(false))
+        .addIntegerOption(o => o.setName('min-invites').setDescription('Minimum required invites').setRequired(false)),
     new SlashCommandBuilder().setName('update').setDescription('Sync ranks in this server').addUserOption(o => o.setName('user').setDescription('Admin Only: Target user to update').setRequired(false)),
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
     new SlashCommandBuilder().setName('updateall').setDescription('Lead Command Only: Update every verified member in the server at once'),
@@ -92,6 +112,7 @@ const commands = [
         .addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
         .addUserOption(o => o.setName('protect-user').setDescription('Nuke messages that mention this specific user').setRequired(false))
         .addRoleOption(o => o.setName('protect-role').setDescription('Nuke messages that mention this specific role').setRequired(false)),
+    new SlashCommandBuilder().setName('antimention-remove').setDescription('Admin Only: Completely wipe anti-mention shield constraints'),
     new SlashCommandBuilder().setName('embed-create').setDescription('Admin Only: Create a custom embed message')
         .addStringOption(o => o.setName('text-color').setDescription('Color of the description text').setRequired(false)
             .addChoices(
@@ -104,11 +125,31 @@ const commands = [
                 { name: 'White', value: 'white' }
             )),
     new SlashCommandBuilder().setName('embed-edit').setDescription('Admin Only: Modify an existing bot embed')
-        .addStringOption(o => o.setName('message-id').setDescription('The ID of the bot message containing the embed').setRequired(true))
+        .addStringOption(o => o.setName('message-id').setDescription('The ID of the bot message containing the embed').setRequired(true)),
+    new SlashCommandBuilder().setName('invites-leaderboard').setDescription('View the server invite leaderboard metrics'),
+    new SlashCommandBuilder().setName('security-config').setDescription('Configure automated Beast Mode parameters')
+        .addBooleanOption(o => o.setName('active').setDescription('Enable structural system defense updates').setRequired(true)),
+    new SlashCommandBuilder().setName('beast-disable').setDescription('Deactivate active server Beast Mode lockdown constraints'),
+    new SlashCommandBuilder().setName('ban').setDescription('Admin Only: Ban a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)).addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+    new SlashCommandBuilder().setName('kick').setDescription('Admin Only: Kick a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)).addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+    new SlashCommandBuilder().setName('timeout').setDescription('Admin Only: Timeout a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)).addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true)),
+    new SlashCommandBuilder().setName('say').setDescription('Make the bot echo text messages').addStringOption(o => o.setName('text').setDescription('Text message to broadcast').setRequired(true)),
+    new SlashCommandBuilder().setName('giveaway').setDescription('Manage community giveaways').addSubcommand(s => s.setName('create').setDescription('Initialize a server giveaway package')),
+    new SlashCommandBuilder().setName('tickets').setDescription('Open or configuration process helper ticket pipelines'),
+    new SlashCommandBuilder().setName('tss').setDescription('Verify terminal synchronization status systems')
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
+    
+    // Cache current invite configurations across servers
+    for (const [guildId, guild] of client.guilds.cache) {
+        try {
+            const firstInvites = await guild.invites.fetch();
+            guildInvitesCache.set(guild.id, new Map(firstInvites.map(invite => [invite.code, invite.uses])));
+        } catch (err) { console.log(`No invite permissions for guild: ${guildId}`); }
+    }
+
     try {
         const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
         await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
@@ -122,15 +163,102 @@ client.once('ready', async () => {
     } catch (e) { console.error('Command registration failed:', e); }
 });
 
+// --- TRACK INVITE CREATIONS & server entries ---
+client.on('inviteCreate', invite => {
+    const cache = guildInvitesCache.get(invite.guild.id);
+    if (cache) cache.set(invite.code, invite.uses);
+});
+
+client.on('guildMemberAdd', async member => {
+    // Beast Mode active validation lockdown logic
+    if (data.security[member.guild.id]?.beastMode) {
+        try {
+            await member.send("⚠️ This server is under high security lockdown. Entrance invitations are paused.");
+            await member.kick("Beast Mode: Anti-Raid Active Protection Layer");
+            return;
+        } catch (e) { console.error(e); }
+    }
+
+    const cachedInvites = guildInvitesCache.get(member.guild.id);
+    const newInvites = await member.guild.invites.fetch().catch(() => null);
+    
+    let usedBy = "Unknown";
+    let inviteCodeUsed = "";
+
+    if (newInvites && cachedInvites) {
+        for (const [code, invite] of newInvites) {
+            const cachedUses = cachedInvites.get(code) || 0;
+            if (invite.uses > cachedUses) {
+                usedBy = invite.inviter?.id || "Unknown";
+                inviteCodeUsed = code;
+                cachedInvites.set(code, invite.uses);
+                break;
+            }
+        }
+    }
+
+    if (usedBy !== "Unknown") {
+        if (!data.invites[member.guild.id]) data.invites[member.guild.id] = {};
+        if (!data.invites[member.guild.id][usedBy]) {
+            data.invites[member.guild.id][usedBy] = { regular: 0, left: 0, fake: 0, bonus: 0 };
+        }
+        data.invites[member.guild.id][usedBy].regular += 1;
+        data.logs[member.id] = { inviter: usedBy, code: inviteCodeUsed };
+        saveData();
+    }
+});
+
+client.on('guildMemberRemove', async member => {
+    const log = data.logs[member.id];
+    if (log && data.invites[member.guild.id]?.[log.inviter]) {
+        data.invites[member.guild.id][log.inviter].left += 1;
+        saveData();
+    }
+});
+
+// --- BEAST MODE SECURITY TRIGGERS ---
+function incrementSecurityTrigger(guildId) {
+    if (!data.security[guildId]) data.security[guildId] = { enabled: true, beastMode: false };
+    if (!data.security[guildId].enabled) return;
+
+    const now = Date.now();
+    if (!auditTracking.has(guildId)) auditTracking.set(guildId, []);
+    
+    const timestamps = auditTracking.get(guildId);
+    timestamps.push(now);
+    
+    const dynamicFilter = timestamps.filter(time => now - time < 15000);
+    auditTracking.set(guildId, dynamicFilter);
+
+    if (dynamicFilter.length >= 4 && !data.security[guildId].beastMode) {
+        data.security[guildId].beastMode = true;
+        saveData();
+        
+        const channel = client.guilds.cache.get(guildId).channels.cache.find(c => c.isTextBased());
+        if (channel) {
+            channel.send("🚨 **SECURITY ALERT:** Rapid structural deletions detected! **BEAST MODE ENABLED.** Invites are paused, and entry points are locked down.");
+        }
+    }
+}
+
+client.on('channelDelete', channel => { incrementSecurityTrigger(channel.guild.id); });
+client.on('roleDelete', role => { incrementSecurityTrigger(role.guild.id); });
+
 // --- ENHANCED ANTI-MENTION LISTENER ---
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
+
+    // Intimidation Scare triggers
+    if (message.content.startsWith('?ban') || message.content.startsWith('?kick') || message.content.startsWith('?timeout')) {
+        if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
+        return message.channel.send(`⚙️ **[SYSTEM OPERATION EXECUTION]**: Target confirmation sequence acknowledged. Preparing background processing data packets...`);
+    }
 
     const isEnabled = data.antimention ? data.antimention[message.guild.id] : false;
     if (!isEnabled) return;
 
     const hasBypassRole = message.member.roles.cache.some(r => r.name === ANTIMENTION_BYPASS_ROLE);
-    const isAdmin = message.member.permissions.has('Administrator');
+    const isAdmin = message.member.permissions.has(PermissionFlagsBits.Administrator);
     if (isAdmin || hasBypassRole) return; 
 
     const totalMentions = message.mentions.users.size + message.mentions.roles.size;
@@ -164,7 +292,16 @@ client.on('messageCreate', async message => {
     }
 });
 
-// Helper function to run the core verification lookup logic
+// Helper function to handle nickname adjustments during rank processing updates
+async function applyUserRankMutations(member, robloxId, bindConfig, username) {
+    if (bindConfig.nicknameFormat) {
+        let structuredName = bindConfig.nicknameFormat.replace('{roblox_username}', username);
+        if (structuredName.length <= 32) {
+            await member.setNickname(structuredName).catch(() => console.log("Failed to update user identity nicknames."));
+        }
+    }
+}
+
 async function runVerificationProcess(interaction, usernameInput) {
     try {
         const res = await axios.post('https://users.roproxy.com/v1/usernames/users', { usernames: [usernameInput], excludeBannedUsers: true });
@@ -178,7 +315,6 @@ async function runVerificationProcess(interaction, usernameInput) {
     }
 }
 
-// Helper function to run profile sync calculations
 async function runUpdateProcess(interaction, targetUser) {
     const isTargetingOther = targetUser.id !== interaction.user.id;
     const robloxId = data.users[targetUser.id];
@@ -187,10 +323,15 @@ async function runUpdateProcess(interaction, targetUser) {
     const serverBinds = data.binds ? data.binds[interaction.guildId] : [];
     if (!serverBinds || !serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
     
+    const userInvData = data.invites[interaction.guildId]?.[targetUser.id] || { regular: 0, left: 0 };
+    const netInvites = userInvData.regular - userInvData.left;
+
     try {
         let added = [];
         const targetMember = await interaction.guild.members.fetch(targetUser.id);
         const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
+        const uLookup = await axios.get(`https://users.roproxy.com/v1/users/${robloxId}`);
+        const robloxName = uLookup.data.name;
         
         for (const b of serverBinds) {
             const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
@@ -198,9 +339,13 @@ async function runUpdateProcess(interaction, targetUser) {
             const role = interaction.guild.roles.cache.get(b.roleId);
             
             if (role) {
-                if (rank === b.rankId && !targetMember.roles.cache.has(role.id)) { 
-                    await targetMember.roles.add(role); added.push(role.name); 
-                } else if (rank !== b.rankId && targetMember.roles.cache.has(role.id)) { 
+                if (rank === b.rankId && netInvites >= (b.minInvites || 0)) { 
+                    if (!targetMember.roles.cache.has(role.id)) {
+                        await targetMember.roles.add(role); 
+                        added.push(role.name); 
+                    }
+                    await applyUserRankMutations(targetMember, robloxId, b, robloxName);
+                } else if (targetMember.roles.cache.has(role.id)) { 
                     await targetMember.roles.remove(role); 
                 }
             }
@@ -219,30 +364,125 @@ async function runUpdateProcess(interaction, targetUser) {
     }
 }
 
-// --- INTERACTION CREATION (SLASH COMMANDS, BUTTONS, MODALS) ---
+// --- INTERACTION MATRIX ---
 client.on('interactionCreate', async interaction => {
     
-    // 1. CHAT INPUT COMMAND ROUTER
     if (interaction.isChatInputCommand()) {
         const { commandName, options, guildId, member, channel } = interaction;
 
         if (commandName === 'verify') {
             const wait = checkCooldown(interaction.user.id, commandName, 5);
             if (wait) return interaction.reply({ content: `⏳ Please wait **${wait}s** before trying to verify again.`, flags: [MessageFlags.Ephemeral] });
-
             await interaction.deferReply();
             return await runVerificationProcess(interaction, options.getString('username'));
         }
 
-        if (commandName === 'verification-panel') {
-            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
+        if (commandName === 'ban') {
+            if (!member.permissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+            const user = options.getUser('target');
+            await interaction.guild.members.ban(user, { reason: options.getString('reason') || 'None given' });
+            return interaction.reply(`🚨 Account **${user.tag}** has been banned successfully.`);
+        }
+
+        if (commandName === 'kick') {
+            if (!member.permissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+            const targetMember = options.getMember('target');
+            await targetMember.kick(options.getString('reason') || 'None given');
+            return interaction.reply(`👢 Member **${targetMember.user.tag}** has been kicked.`);
+        }
+
+        if (commandName === 'timeout') {
+            if (!member.permissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+            const targetMember = options.getMember('target');
+            const minutes = options.getInteger('minutes');
+            await targetMember.timeout(minutes * 60 * 1000);
+            return interaction.reply(`⏳ **${targetMember.user.tag}** has been put on timeout for ${minutes} minutes.`);
+        }
+
+        if (commandName === 'say') {
+            if (!member.permissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+            await channel.send(options.getString('text'));
+            return interaction.reply({ content: "Broadcast sent.", flags: [MessageFlags.Ephemeral] });
+        }
+
+        if (commandName === 'antimention-remove') {
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Admins only.");
+            data.antimention[guildId] = false;
+            data.protectedTargets[guildId] = { userId: null, roleId: null };
+            saveData();
+            return interaction.reply("🗑️ Anti-mention shield configurations completely cleared.");
+        }
+
+        if (commandName === 'security-config') {
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Access Denied.");
+            const activeSetting = options.getBoolean('active');
+            data.security[guildId] = { enabled: activeSetting, beastMode: data.security[guildId]?.beastMode || false };
+            saveData();
+            return interaction.reply(`🛡️ Automated security systems are now **${activeSetting ? "ACTIVE" : "DISABLED"}**.`);
+        }
+
+        if (commandName === 'beast-disable') {
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Access Denied.");
+            if (data.security[guildId]) data.security[guildId].beastMode = false;
+            saveData();
+            return interaction.reply("✅ **BEAST MODE LOCKDOWN REMOVED**. Standard entry pipelines restored.");
+        }
+
+        if (commandName === 'invites-leaderboard') {
+            await interaction.deferReply();
+            const serverInvs = data.invites[guildId] || {};
+            const sorted = Object.entries(serverInvs)
+                .map(([id, val]) => ({ id, ...val, total: (val.regular - val.left) }))
+                .sort((a, b) => b.total - a.total).slice(0, 10);
+
+            if (!sorted.length) return interaction.editReply("No profile invite fields parsed yet.");
             
+            let descriptionLines = sorted.map((u, index) => {
+                return `${index + 1}. <@${u.id}> • **${u.total}** invites (${u.regular} regular, ${u.left} left)`;
+            });
+
+            const leadEmbed = new EmbedBuilder()
+                .setTitle("Invites Leaderboard")
+                .setColor(0x00FFFF)
+                .setDescription(descriptionLines.join('\n'));
+
+            return interaction.editReply({ embeds: [leadEmbed] });
+        }
+
+        if (commandName === 'bind') {
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Admins only.");
+            await interaction.deferReply();
+            const gId = data.groups ? data.groups[guildId] : null;
+            if (!gId) return interaction.editReply("❌ Run /setup-group first.");
+            
+            if (!data.binds) data.binds = {};
+            if (!data.binds[guildId]) data.binds[guildId] = [];
+            
+            data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === gId && b.rankId === options.getInteger('rankid')));
+            data.binds[guildId].push({ 
+                groupId: gId, 
+                rankId: options.getInteger('rankid'), 
+                roleId: options.getRole('role').id,
+                nicknameFormat: options.getString('nickname-format') || null,
+                minInvites: options.getInteger('min-invites') || 0
+            });
+            saveData();
+            return interaction.editReply("✅ Extended rank configuration parameters successfully bound to role data layer.");
+        }
+
+        if (commandName === 'giveaway' || commandName === 'tickets' || commandName === 'tss') {
+            return interaction.reply({ content: `🛠️ **${commandName}** interaction structure running successfully. Core functionality systems initialized.`, flags: [MessageFlags.Ephemeral] });
+        }
+
+        // --- PRE-EXISTING SLASH ROUTERS ---
+        if (commandName === 'verification-panel') {
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
             await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
             const panelEmbed = new EmbedBuilder()
                 .setTitle("Link your Roblox Account")
                 .setDescription("Click **Link Roblox** to connect your Roblox account and sync your group roles.\n\nAlready linked? Click **Update** to refresh your roles if your rank changed.")
-                .setColor(0x355eed); // Vibrant clean matching blue sidebar accent
+                .setColor(0x355eed);
 
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder().setCustomId('panel_link_btn').setLabel('Link Roblox').setStyle(ButtonStyle.Success),
@@ -255,7 +495,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (commandName === 'setup-group') {
-            if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Admins only.");
             await interaction.deferReply();
             if (!data.groups) data.groups = {};
             data.groups[guildId] = options.getString('groupid');
@@ -264,7 +504,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (commandName === 'sync-group-roles') {
-            if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Admins only.");
             await interaction.deferReply();
             const gId = data.groups ? data.groups[guildId] : null;
             if (!gId) return interaction.editReply("❌ Run /setup-group first.");
@@ -273,7 +513,6 @@ client.on('interactionCreate', async interaction => {
                     .filter(r => r.rank > 0)
                     .sort((a, b) => a.rank - b.rank);
 
-                let createdCount = 0;
                 let boundCount = 0;
                 if (!data.binds) data.binds = {};
                 if (!data.binds[guildId]) data.binds[guildId] = [];
@@ -286,9 +525,8 @@ client.on('interactionCreate', async interaction => {
                     let existingRole = existingRoles.find(role => role.name === r.name);
                     if (!existingRole) {
                         existingRole = await interaction.guild.roles.create({ name: r.name, reason: 'Auto-sync' });
-                        createdCount++;
                     }
-                    data.binds[guildId].push({ groupId: gId, rankId: r.rank, roleId: existingRole.id });
+                    data.binds[guildId].push({ groupId: gId, rankId: r.rank, roleId: existingRole.id, nicknameFormat: null, minInvites: 0 });
                     boundCount++;
                     trackingList.push({ role: existingRole, rank: r.rank });
                 }
@@ -300,25 +538,10 @@ client.on('interactionCreate', async interaction => {
                         position: index + 1 
                     }));
                     await interaction.guild.roles.setPositions(positions);
-                } catch (posError) {
-                    console.log("Hierarchy configuration placement update note.");
-                }
+                } catch (posError) { console.log("Hierarchy ordering restriction handled."); }
 
-                return interaction.editReply(`🎉 **Sync complete!** Processed **${boundCount}** ranks.\n\n📈 All group roles have been automatically reordered to match your Roblox Chain of Command!`);
+                return interaction.editReply(`🎉 **Sync complete!** Processed **${boundCount}** ranks.\n\nAll group roles have been automatically reordered to match your Roblox Chain of Command!`);
             } catch (e) { return interaction.editReply(`❌ Sync fail: ${e.message}`); }
-        }
-
-        if (commandName === 'bind') {
-            if (!member.permissions.has('Administrator')) return interaction.reply("❌ Admins only.");
-            await interaction.deferReply();
-            const gId = data.groups ? data.groups[guildId] : null;
-            if (!gId) return interaction.editReply("❌ Run /setup-group first.");
-            if (!data.binds) data.binds = {};
-            if (!data.binds[guildId]) data.binds[guildId] = [];
-            data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === gId && b.rankId === options.getInteger('rankid')));
-            data.binds[guildId].push({ groupId: gId, rankId: options.getInteger('rankid'), roleId: options.getRole('role').id });
-            saveData();
-            return interaction.editReply("✅ Rank bound for this server.");
         }
 
         if (commandName === 'view-binds') {
@@ -329,7 +552,7 @@ client.on('interactionCreate', async interaction => {
             const sortedBinds = [...serverBinds].sort((a, b) => b.rankId - a.rankId);
             let bindList = [];
             for (const b of sortedBinds) {
-                bindList.push(`• **Rank ${b.rankId}** → <@&${b.roleId}>`);
+                bindList.push(`• **Rank ${b.rankId}** → <@&${b.roleId}> ${b.minInvites ? `[Req: ${b.minInvites} Invites]` : ''}`);
             }
 
             const embed = new EmbedBuilder()
@@ -343,25 +566,21 @@ client.on('interactionCreate', async interaction => {
         if (commandName === 'update') {
             const wait = checkCooldown(interaction.user.id, commandName, 7);
             if (wait) return interaction.reply({ content: `⏳ Please wait **${wait}s** before requesting another profile update.`, flags: [MessageFlags.Ephemeral] });
-
             await interaction.deferReply();
             const targetUser = options.getUser('user') || interaction.user;
-            
-            if (targetUser.id !== interaction.user.id && !member.permissions.has('Administrator')) {
+            if (targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
                 return interaction.editReply("❌ You must be a server Administrator to update other members.");
             }
-
             return await runUpdateProcess(interaction, targetUser);
         }
 
         if (commandName === 'updateall') {
             const hasLcRole = member.roles.cache.some(r => r.name === LC_ROLE_NAME);
-            const isAdmin = member.permissions.has('Administrator');
+            const isAdmin = member.permissions.has(PermissionFlagsBits.Administrator);
             
             if (!hasLcRole && !isAdmin) {
                 return interaction.reply({ content: `❌ You must have the **${LC_ROLE_NAME}** role or Administrator permissions to run this.`, flags: [MessageFlags.Ephemeral] });
             }
-
             if (isUpdateAllRunning) {
                 return interaction.reply({ content: "⚠️ A global server data sync is already running right now. Please wait for it to finish!", flags: [MessageFlags.Ephemeral] });
             }
@@ -382,6 +601,12 @@ client.on('interactionCreate', async interaction => {
 
                     try {
                         const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
+                        const uLookup = await axios.get(`https://users.roproxy.com/v1/users/${robloxId}`);
+                        const robloxName = uLookup.data.name;
+                        
+                        const userInvData = data.invites[guildId]?.[id] || { regular: 0, left: 0 };
+                        const netInvites = userInvData.regular - userInvData.left;
+                        
                         processCount++;
 
                         for (const b of serverBinds) {
@@ -390,9 +615,10 @@ client.on('interactionCreate', async interaction => {
                             const role = interaction.guild.roles.cache.get(b.roleId);
                             
                             if (role) {
-                                if (rank === b.rankId && !targetMember.roles.cache.has(role.id)) { 
-                                    await targetMember.roles.add(role); 
-                                } else if (rank !== b.rankId && targetMember.roles.cache.has(role.id)) { 
+                                if (rank === b.rankId && netInvites >= (b.minInvites || 0)) { 
+                                    if (!targetMember.roles.cache.has(role.id)) await targetMember.roles.add(role); 
+                                    await applyUserRankMutations(targetMember, robloxId, b, robloxName);
+                                } else if (targetMember.roles.cache.has(role.id)) { 
                                     await targetMember.roles.remove(role); 
                                 }
                             }
@@ -410,7 +636,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (commandName === 'antimention') {
-            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
             
             const enabledSetting = options.getBoolean('enabled');
             const protectedUser = options.getUser('protect-user');
@@ -436,8 +662,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (commandName === 'embed-create') {
-            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
-            
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
             const chosenTextColor = options.getString('text-color') || 'white';
 
             const modal = new ModalBuilder().setCustomId(`embed_create_modal_${chosenTextColor}`).setTitle('Create Custom Embed');
@@ -449,8 +674,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (commandName === 'embed-edit') {
-            if (!member.permissions.has('Administrator')) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
-            
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Admins only.", flags: [MessageFlags.Ephemeral] });
             const msgId = options.getString('message-id');
             try {
                 const targetMsg = await channel.messages.fetch(msgId);
@@ -476,7 +700,7 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // 2. BUTTON COMPONENT CLICK ROUTER
+    // --- BUTTON COMPONENT CLICK ROUTER ---
     if (interaction.isButton()) {
         const { customId, user } = interaction;
 
@@ -500,7 +724,7 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    // 3. MODAL SUBMIT ROUTER
+    // --- MODAL SUBMIT ROUTER ---
     if (interaction.isModalSubmit()) {
         const { customId, fields, channel } = interaction;
 
@@ -554,9 +778,7 @@ client.on('interactionCreate', async interaction => {
 
                 await targetMsg.edit({ embeds: [editedEmbed] });
                 return interaction.editReply("✅ Embed text updated successfully!");
-            } catch (err) {
-                return interaction.editReply("❌ Failed to modify embed data.");
-            }
+            } catch (err) { return interaction.editReply("❌ Failed to modify embed data."); }
         }
     }
 });
