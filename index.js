@@ -5,14 +5,12 @@ const {
     Routes, 
     SlashCommandBuilder, 
     EmbedBuilder, 
-    ModalBuilder, 
-    TextInputBuilder, 
-    TextInputStyle, 
     ActionRowBuilder, 
     ButtonBuilder, 
     ButtonStyle, 
     MessageFlags,
-    PermissionFlagsBits
+    PermissionFlagsBits,
+    ChannelType
 } = require('discord.js');
 const { 
     joinVoiceChannel, 
@@ -49,7 +47,6 @@ let data = {
     security: {} 
 };
 
-// --- CONFIGURATION WITH LITERAL CHARACTERS ---
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
 const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; 
 
@@ -58,9 +55,8 @@ const guildInvitesCache = new Map();
 const auditTracking = new Map();
 let isUpdateAllRunning = false; 
 
-// Track active audio configurations per guild
+// Cache voice player mappings
 const audioPlayers = new Map();
-const activeVoiceChannels = new Map(); // Maps Guild ID -> Voice Channel Text ID
 
 function loadData() {
     try {
@@ -128,7 +124,7 @@ const commands = [
             )),
     new SlashCommandBuilder().setName('embed-edit').setDescription('Admin Only: Modify an existing bot embed')
         .addStringOption(o => o.setName('message-id').setDescription('The ID of the bot message containing the embed').setRequired(true)),
-    new SlashCommandBuilder().setName('invites-leaderboard').setDescription('View the server invite leaderboard metrics'),
+    new SlashCommandBuilder().setName('invites-leaderboard').setDescription('View the server detailed invite leaderboard metrics'),
     new SlashCommandBuilder().setName('security-config').setDescription('Configure automated Beast Mode parameters')
         .addBooleanOption(o => o.setName('active').setDescription('Enable structural system defense updates').setRequired(true))
         .addIntegerOption(o => o.setName('beast-threshold').setDescription('Deletions within 15s to lock server (Default: 4)').setRequired(false)),
@@ -141,29 +137,22 @@ const commands = [
     new SlashCommandBuilder().setName('tickets').setDescription('Open or configuration process helper ticket pipelines'),
     new SlashCommandBuilder().setName('tss').setDescription('Verify terminal synchronization status systems'),
     new SlashCommandBuilder().setName('tts').setDescription('Send a standard text-to-speech announcement message').addStringOption(o => o.setName('message').setDescription('The content to speak aloud').setRequired(true)),
-    
-    // --- VC TTS INTEGRATION COMMANDS ---
-    new SlashCommandBuilder().setName('vc-connect').setDescription('Summon the bot to your current voice channel to read text chat aloud'),
-    new SlashCommandBuilder().setName('vc-disconnect').setDescription('Disconnect the bot from the active voice channel')
+    new SlashCommandBuilder().setName('vc-disconnect').setDescription('Force disconnect the bot from the active voice channel connection')
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
-    
     for (const [guildId, guild] of client.guilds.cache) {
         try {
             const firstInvites = await guild.invites.fetch();
             guildInvitesCache.set(guild.id, new Map(firstInvites.map(invite => [invite.code, invite.uses])));
         } catch (err) { console.log(`No invite permissions for guild: ${guildId}`); }
     }
-
     try {
         const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
         await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
-        
         const guilds = await client.guilds.fetch();
         for (const [guildId] of guilds) {
-            await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: [] });
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
         }
         console.log('All slash commands are synced globally!');
@@ -229,19 +218,15 @@ function incrementSecurityTrigger(guildId) {
 
     const now = Date.now();
     if (!auditTracking.has(guildId)) auditTracking.set(guildId, []);
-    
     const timestamps = auditTracking.get(guildId);
     timestamps.push(now);
-    
     const dynamicFilter = timestamps.filter(time => now - time < 15000);
     auditTracking.set(guildId, dynamicFilter);
 
     const criticalThreshold = data.security[guildId].limit || 4;
-
     if (dynamicFilter.length >= criticalThreshold && !data.security[guildId].beastMode) {
         data.security[guildId].beastMode = true;
         saveData();
-        
         const channel = client.guilds.cache.get(guildId).channels.cache.find(c => c.isTextBased());
         if (channel) {
             channel.send(`🚨 **SECURITY ALERT:** Rapid structural deletions detected (${dynamicFilter.length}/${criticalThreshold})! **BEAST MODE ENABLED.** Invites are paused, and entry points are locked down.`);
@@ -252,26 +237,38 @@ function incrementSecurityTrigger(guildId) {
 client.on('channelDelete', channel => { if (channel.guild) incrementSecurityTrigger(channel.guild.id); });
 client.on('roleDelete', role => { if (role.guild) incrementSecurityTrigger(role.guild.id); });
 
-// --- TEXT CHAT AND VOICE CHAT TTS MONITOR ENGINE ---
+// --- AUTOMATED CHAT MONITORING ---
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
-    // Command intercept placeholders
+    // Command Intercept Interventions
     if (message.content.startsWith('?ban') || message.content.startsWith('?kick') || message.content.startsWith('?timeout')) {
         if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
         return message.channel.send(`⚙️ **[SYSTEM OPERATION EXECUTION]**: Target confirmation sequence acknowledged. Preparing background processing data packets...`);
     }
 
-    // --- CHECK VOICE CHANNEL TEXT SPEECH RUNTIME ---
-    const monitoredChannelId = activeVoiceChannels.get(message.guild.id);
-    if (monitoredChannelId && message.channel.id === monitoredChannelId) {
-        const connection = getVoiceConnection(message.guild.id);
-        if (!connection) {
-            activeVoiceChannels.delete(message.guild.id);
-        } else {
+    // --- AUTOMATED COMMANDLESS VOICE CHANNEL CHAT TTS ---
+    if (message.channel.type === ChannelType.GuildVoice || message.channel.isVoiceBased()) {
+        const voiceChannel = message.member?.voice?.channel;
+        
+        // Ensure the sender is actually inside that voice channel
+        if (voiceChannel && voiceChannel.id === message.channel.id) {
+            let connection = getVoiceConnection(message.guild.id);
+            
+            // Auto-join if not connected yet or sitting in the wrong channel
+            if (!connection || connection.joinConfig.channelId !== voiceChannel.id) {
+                connection = joinVoiceChannel({
+                    channelId: voiceChannel.id,
+                    guildId: message.guild.id,
+                    adapterCreator: message.guild.voiceAdapterCreator,
+                    selfMute: false,
+                    selfDeaf: false
+                });
+            }
+
             const speakerName = message.member.displayName || message.author.username;
             const cleanContent = message.content.replace(/(?:https?|ftp):\/\/[\n\S]+/g, '[link]'); 
-            const speechText = `${speakerName} says: ${cleanContent}`.substring(0, 200);
+            const speechText = `${speakerName}: ${cleanContent}`.substring(0, 200);
 
             try {
                 const url = googleTTS.getAudioUrl(speechText, {
@@ -291,12 +288,12 @@ client.on('messageCreate', async message => {
                 const resource = createAudioResource(url);
                 player.play(resource);
             } catch (err) {
-                console.error("Voice TTS Audio Failure:", err.message);
+                console.error("Voice Auto-TTS Failure:", err.message);
             }
         }
     }
 
-    // --- ANTI-MENTION PROTOCOLS ---
+    // --- ANTI-MENTION PROTECTION ---
     const isEnabled = data.antimention ? data.antimention[message.guild.id] : false;
     if (!isEnabled) return;
 
@@ -401,34 +398,14 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel, guild } = interaction;
 
-    // --- VOICE CONNECT SYSTEM ---
-    if (commandName === 'vc-connect') {
-        if (!member.voice.channel) {
-            return interaction.reply({ content: "❌ You must be inside a Voice Channel to invite me!", flags: [MessageFlags.Ephemeral] });
-        }
-        const voiceChannel = member.voice.channel;
-        const connection = joinVoiceChannel({
-            channelId: voiceChannel.id,
-            guildId: guild.id,
-            adapterCreator: guild.voiceAdapterCreator,
-        });
-
-        activeVoiceChannels.set(guild.id, voiceChannel.id);
-        return interaction.reply({ content: `🔊 **Connected to ${voiceChannel.name}!** I am now converting typed chat messages into speech.` });
-    }
-
     if (commandName === 'vc-disconnect') {
         const connection = getVoiceConnection(guild.id);
-        if (!connection) {
-            return interaction.reply({ content: "❌ I am not actively sitting inside any voice channels.", flags: [MessageFlags.Ephemeral] });
-        }
+        if (!connection) return interaction.reply({ content: "❌ I am not sitting inside a voice channel.", flags: [MessageFlags.Ephemeral] });
         connection.destroy();
-        activeVoiceChannels.delete(guild.id);
         audioPlayers.delete(guild.id);
         return interaction.reply("👋 Disconnected from voice chat.");
     }
 
-    // --- STANDARD NATIVE CHAT TTS ---
     if (commandName === 'tts') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.reply({ content: "❌ Administrator validation required.", flags: [MessageFlags.Ephemeral] });
@@ -437,7 +414,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply({ content: "TTS sent.", flags: [MessageFlags.Ephemeral] });
     }
 
-    // --- SECURITY SYSTEMS CONFIG ---
     if (commandName === 'security-config') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Access Denied.");
         const activeSetting = options.getBoolean('active');
@@ -464,6 +440,37 @@ client.on('interactionCreate', async interaction => {
         return await runVerificationProcess(interaction, options.getString('username'));
     }
 
+    // --- RE-ENGINEERED DETAILED LEADERBOARD COMMAND ---
+    if (commandName === 'invites-leaderboard') {
+        await interaction.deferReply();
+        const serverInvs = data.invites[guildId] || {};
+        
+        const sorted = Object.entries(serverInvs)
+            .map(([id, val]) => ({
+                id,
+                regular: val.regular || 0,
+                left: val.left || 0,
+                fake: val.fake || 0,
+                bonus: val.bonus || 0,
+                total: (val.regular || 0) - (val.left || 0) + (val.bonus || 0)
+            }))
+            .sort((a, b) => b.total - a.total)
+            .slice(0, 10);
+
+        if (!sorted.length) return interaction.editReply("No profile invite fields parsed yet.");
+
+        let descriptionLines = sorted.map((u, i) => {
+            return `${i + 1}. <@${u.id}> • **${u.total}** invites. (${u.regular} regular, ${u.left} left, ${u.fake} fake, ${u.bonus} bonus)`;
+        });
+
+        const leaderboardEmbed = new EmbedBuilder()
+            .setTitle("Invites Leaderboard")
+            .setColor(0x00FFFF)
+            .setDescription(descriptionLines.join('\n'));
+
+        return interaction.editReply({ embeds: [leaderboardEmbed] });
+    }
+
     if (commandName === 'setup-group') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Access Denied.");
         await interaction.deferReply();
@@ -484,7 +491,6 @@ client.on('interactionCreate', async interaction => {
 
             if (!data.binds[guildId]) data.binds[guildId] = [];
             const existingRoles = await interaction.guild.roles.fetch();
-            const trackingList = [];
 
             for (const r of rRoles) {
                 data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === gId && b.rankId === r.rank));
@@ -493,7 +499,6 @@ client.on('interactionCreate', async interaction => {
                     existingRole = await interaction.guild.roles.create({ name: r.name, reason: 'Auto-sync' });
                 }
                 data.binds[guildId].push({ groupId: gId, rankId: r.rank, roleId: existingRole.id, nicknameFormat: null, minInvites: 0 });
-                trackingList.push({ role: existingRole, rank: r.rank });
             }
             saveData();
             return interaction.editReply(`🎉 **Sync complete!** Chains arranged successfully.`);
@@ -535,14 +540,6 @@ client.on('interactionCreate', async interaction => {
         if (!member.permissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await channel.send(options.getString('text'));
         return interaction.reply({ content: "Broadcast sent.", flags: [MessageFlags.Ephemeral] });
-    }
-
-    if (commandName === 'invites-leaderboard') {
-        await interaction.deferReply();
-        const serverInvs = data.invites[guildId] || {};
-        const sorted = Object.entries(serverInvs).map(([id, val]) => ({ id, total: (val.regular - val.left) })).sort((a, b) => b.total - a.total).slice(0, 10);
-        let descriptionLines = sorted.map((u, i) => `${i + 1}. <@${u.id}> • **${u.total}** net invites`);
-        return interaction.editReply({ embeds: [new EmbedBuilder().setTitle("Leaderboard").setDescription(descriptionLines.join('\n') || "Empty")] });
     }
 
     if (commandName === 'verification-panel') {
