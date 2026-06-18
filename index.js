@@ -10,14 +10,16 @@ const {
     ButtonStyle, 
     MessageFlags,
     PermissionFlagsBits,
-    ChannelType
+    ChannelType,
+    MessageType
 } = require('discord.js');
 const { 
     joinVoiceChannel, 
     createAudioPlayer, 
     createAudioResource, 
     AudioPlayerStatus, 
-    getVoiceConnection 
+    getVoiceConnection,
+    StreamType
 } = require('@discordjs/voice');
 const googleTTS = require('google-tts-api');
 const axios = require('axios');
@@ -160,7 +162,6 @@ client.once('ready', async () => {
     } catch (e) { console.error('Command registration failed:', e); }
 });
 
-// --- TRACK INVITE CREATIONS & ENTRIES ---
 client.on('inviteCreate', invite => {
     const cache = guildInvitesCache.get(invite.guild.id);
     if (cache) cache.set(invite.code, invite.uses);
@@ -246,7 +247,7 @@ client.on('messageCreate', async message => {
         return message.channel.send(`⚙️ **[SYSTEM OPERATION EXECUTION]**: Target confirmation sequence acknowledged. Preparing background processing data packets...`);
     }
 
-    // --- ACCURATE COMPREHENSIVE VOICE TEXT-CHAT CAPTURE ---
+    // --- AUTOMATED VOICE TEXT-CHAT INTERACTIVE AUDIO STREAM ---
     const voiceChannel = message.member?.voice?.channel;
     const isVoiceChat = message.channel.isVoiceBased() || message.channel.type === ChannelType.GuildVoice;
 
@@ -282,14 +283,14 @@ client.on('messageCreate', async message => {
                 audioPlayers.set(message.guild.id, player);
             }
 
-            const resource = createAudioResource(url);
+            const resource = createAudioResource(url, { inputType: StreamType.Arbitrary });
             player.play(resource);
         } catch (err) {
             console.error("Voice Auto-TTS Failure:", err.message);
         }
     }
 
-    // --- ANTI-MENTION PROTECTION ---
+    // --- ANTI-MENTION PROTECTION LAYER WITH REPLY HOOK EXEMPTION ---
     const isEnabled = data.antimention ? data.antimention[message.guild.id] : false;
     if (!isEnabled) return;
 
@@ -302,10 +303,13 @@ client.on('messageCreate', async message => {
     let triggeredProtection = false;
     let protectionReason = "";
 
-    if (targetConfig) {
+    // If the message is a Reply, we bypass specific protected user checks so they can get pinged natively
+    const isDiscordReply = message.type === MessageType.Reply;
+
+    if (targetConfig && !isDiscordReply) {
         if (targetConfig.userId && message.mentions.users.has(targetConfig.userId)) {
             triggeredProtection = true;
-            protectionReason = `pings to <@${targetConfig.userId}> are strictly forbidden`;
+            protectionReason = `pings to <@${targetConfig.userId}> are strictly forbidden unless replying`;
         }
         if (targetConfig.roleId && message.mentions.roles.has(targetConfig.roleId)) {
             triggeredProtection = true;
@@ -313,7 +317,8 @@ client.on('messageCreate', async message => {
         }
     }
 
-    if (totalMentions > 4 || triggeredProtection) {
+    // Mass mentions are always blocked regardless of format if they cross the threshold
+    if ((totalMentions > 4 && !isDiscordReply) || triggeredProtection) {
         if (!protectionReason) protectionReason = "mass mentions are restricted while the anti-mention shield is active";
         try {
             await message.delete();
@@ -389,7 +394,6 @@ async function runUpdateProcess(interaction, targetUser) {
     } catch (e) { return interaction.editReply("❌ Update network error."); }
 }
 
-// --- INTERACTION CONNECTIVE MATRIX ---
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel, guild } = interaction;
@@ -519,7 +523,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply("🚨 Account banned.");
     }
 
-    // --- NEW UNBAN INTERACTION HANDLER ---
     if (commandName === 'unban') {
         if (!member.permissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         const userIdInput = options.getString('userid');
@@ -543,7 +546,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.reply("⏳ Member isolated.");
     }
 
-    // --- NEW UNMUTE (TIMEOUT CLEAR) INTERACTION HANDLER ---
     if (commandName === 'unmute') {
         if (!member.permissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         const targetMember = options.getMember('target');
