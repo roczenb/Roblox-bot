@@ -129,8 +129,10 @@ const commands = [
         .addIntegerOption(o => o.setName('beast-threshold').setDescription('Deletions within 15s to lock server (Default: 4)').setRequired(false)),
     new SlashCommandBuilder().setName('beast-disable').setDescription('Deactivate active server Beast Mode lockdown constraints'),
     new SlashCommandBuilder().setName('ban').setDescription('Admin Only: Ban a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)).addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
+    new SlashCommandBuilder().setName('unban').setDescription('Admin Only: Unban a user by ID').addStringOption(o => o.setName('userid').setDescription('Discord User ID').setRequired(true)),
     new SlashCommandBuilder().setName('kick').setDescription('Admin Only: Kick a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)).addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
     new SlashCommandBuilder().setName('timeout').setDescription('Admin Only: Timeout a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)).addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true)),
+    new SlashCommandBuilder().setName('unmute').setDescription('Admin Only: Lift an active timeout from a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)),
     new SlashCommandBuilder().setName('say').setDescription('Make the bot echo text messages').addStringOption(o => o.setName('text').setDescription('Text message to broadcast').setRequired(true)),
     new SlashCommandBuilder().setName('giveaway').setDescription('Manage community giveaways').addSubcommand(s => s.setName('create').setDescription('Initialize a server giveaway package')),
     new SlashCommandBuilder().setName('tickets').setDescription('Open or configuration process helper ticket pipelines'),
@@ -248,7 +250,6 @@ client.on('messageCreate', async message => {
     const voiceChannel = message.member?.voice?.channel;
     const isVoiceChat = message.channel.isVoiceBased() || message.channel.type === ChannelType.GuildVoice;
 
-    // Check if user is in a voice channel AND typing inside that voice channel's chat interface
     if (voiceChannel && (isVoiceChat || message.channel.id === voiceChannel.id)) {
         let connection = getVoiceConnection(message.guild.id);
         
@@ -517,6 +518,18 @@ client.on('interactionCreate', async interaction => {
         await interaction.guild.members.ban(options.getUser('target'));
         return interaction.reply("🚨 Account banned.");
     }
+
+    // --- NEW UNBAN INTERACTION HANDLER ---
+    if (commandName === 'unban') {
+        if (!member.permissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        const userIdInput = options.getString('userid');
+        try {
+            await interaction.guild.members.unban(userIdInput);
+            return interaction.reply(`✅ Successfully unbanned user ID: \`${userIdInput}\``);
+        } catch (err) {
+            return interaction.reply({ content: `❌ Failed to unban user. Ensure the ID is valid and they are banned. Error: ${err.message}`, flags: [MessageFlags.Ephemeral] });
+        }
+    }
     
     if (commandName === 'kick') {
         if (!member.permissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
@@ -528,6 +541,19 @@ client.on('interactionCreate', async interaction => {
         if (!member.permissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await options.getMember('target').timeout(options.getInteger('minutes') * 60 * 1000);
         return interaction.reply("⏳ Member isolated.");
+    }
+
+    // --- NEW UNMUTE (TIMEOUT CLEAR) INTERACTION HANDLER ---
+    if (commandName === 'unmute') {
+        if (!member.permissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        const targetMember = options.getMember('target');
+        if (!targetMember) return interaction.reply({ content: "❌ Target member not found in this guild.", flags: [MessageFlags.Ephemeral] });
+        try {
+            await targetMember.timeout(null);
+            return interaction.reply(`🔊 Active timeout has been lifted from <@${targetMember.id}>.`);
+        } catch (err) {
+            return interaction.reply({ content: `❌ Failed to remove timeout: ${err.message}`, flags: [MessageFlags.Ephemeral] });
+        }
     }
 
     if (commandName === 'say') {
