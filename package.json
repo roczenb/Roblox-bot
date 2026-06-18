@@ -1,22 +1,20 @@
 {
-  "name": "roblox-discord-security-bot",
+  "name": "roblox-discord-bot",
   "version": "1.0.0",
-  "description": "Roblox binding and advanced server security management bot with voice TTS.",
+  "description": "Roblox group management and voice TTS utility bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "@discordjs/opus": "^0.9.0",
     "@discordjs/voice": "^0.17.0",
-    "axios": "^1.7.2",
-    "discord.js": "^14.15.3",
-    "ffmpeg-static": "^5.2.0",
+    "axios": "^1.6.0",
+    "discord.js": "^14.14.1",
     "google-tts-api": "^2.0.2",
-    "libsodium-wrappers": "^0.7.15"
+    "libsodium-wrappers": "^0.7.13"
   },
   "engines": {
-    "node": ">=22.0.0"
-  },
-  "author": "",
-  "license": "ISC"
+    "node": ">=16.11.0"
+  }
 }
