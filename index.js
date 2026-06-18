@@ -55,7 +55,6 @@ const guildInvitesCache = new Map();
 const auditTracking = new Map();
 let isUpdateAllRunning = false; 
 
-// Cache voice player mappings
 const audioPlayers = new Map();
 
 function loadData() {
@@ -211,7 +210,6 @@ client.on('guildMemberRemove', async member => {
     }
 });
 
-// --- BEAST MODE SECURITY TRIGGERS ---
 function incrementSecurityTrigger(guildId) {
     if (!data.security[guildId]) data.security[guildId] = { enabled: true, beastMode: false, limit: 4 };
     if (!data.security[guildId].enabled) return;
@@ -237,59 +235,55 @@ function incrementSecurityTrigger(guildId) {
 client.on('channelDelete', channel => { if (channel.guild) incrementSecurityTrigger(channel.guild.id); });
 client.on('roleDelete', role => { if (role.guild) incrementSecurityTrigger(role.guild.id); });
 
-// --- AUTOMATED CHAT MONITORING ---
+// --- AUTOMATED CHAT MONITORING ENGINE ---
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
-    // Command Intercept Interventions
     if (message.content.startsWith('?ban') || message.content.startsWith('?kick') || message.content.startsWith('?timeout')) {
         if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
         return message.channel.send(`⚙️ **[SYSTEM OPERATION EXECUTION]**: Target confirmation sequence acknowledged. Preparing background processing data packets...`);
     }
 
-    // --- AUTOMATED COMMANDLESS VOICE CHANNEL CHAT TTS ---
-    if (message.channel.type === ChannelType.GuildVoice || message.channel.isVoiceBased()) {
-        const voiceChannel = message.member?.voice?.channel;
+    // --- ACCURATE AUTOMATED VOICE TEXT-CHAT TRACKER ---
+    const voiceChannel = message.member?.voice?.channel;
+    
+    // Check if the text message channel matches the voice channel ID the user is in
+    if (voiceChannel && message.channel.id === voiceChannel.id) {
+        let connection = getVoiceConnection(message.guild.id);
         
-        // Ensure the sender is actually inside that voice channel
-        if (voiceChannel && voiceChannel.id === message.channel.id) {
-            let connection = getVoiceConnection(message.guild.id);
-            
-            // Auto-join if not connected yet or sitting in the wrong channel
-            if (!connection || connection.joinConfig.channelId !== voiceChannel.id) {
-                connection = joinVoiceChannel({
-                    channelId: voiceChannel.id,
-                    guildId: message.guild.id,
-                    adapterCreator: message.guild.voiceAdapterCreator,
-                    selfMute: false,
-                    selfDeaf: false
-                });
+        if (!connection || connection.joinConfig.channelId !== voiceChannel.id) {
+            connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: message.guild.id,
+                adapterCreator: message.guild.voiceAdapterCreator,
+                selfMute: false,
+                selfDeaf: false
+            });
+        }
+
+        const speakerName = message.member.displayName || message.author.username;
+        const cleanContent = message.content.replace(/(?:https?|ftp):\/\/[\n\S]+/g, '[link]'); 
+        const speechText = `${speakerName} says: ${cleanContent}`.substring(0, 200);
+
+        try {
+            const url = googleTTS.getAudioUrl(speechText, {
+                lang: 'en',
+                slow: false,
+                host: 'https://translate.google.com',
+                timeout: 10000,
+            });
+
+            let player = audioPlayers.get(message.guild.id);
+            if (!player) {
+                player = createAudioPlayer();
+                connection.subscribe(player);
+                audioPlayers.set(message.guild.id, player);
             }
 
-            const speakerName = message.member.displayName || message.author.username;
-            const cleanContent = message.content.replace(/(?:https?|ftp):\/\/[\n\S]+/g, '[link]'); 
-            const speechText = `${speakerName}: ${cleanContent}`.substring(0, 200);
-
-            try {
-                const url = googleTTS.getAudioUrl(speechText, {
-                    lang: 'en',
-                    slow: false,
-                    host: 'https://translate.google.com',
-                    timeout: 10000,
-                });
-
-                let player = audioPlayers.get(message.guild.id);
-                if (!player) {
-                    player = createAudioPlayer();
-                    connection.subscribe(player);
-                    audioPlayers.set(message.guild.id, player);
-                }
-
-                const resource = createAudioResource(url);
-                player.play(resource);
-            } catch (err) {
-                console.error("Voice Auto-TTS Failure:", err.message);
-            }
+            const resource = createAudioResource(url);
+            player.play(resource);
+        } catch (err) {
+            console.error("Voice Auto-TTS Failure:", err.message);
         }
     }
 
@@ -440,7 +434,6 @@ client.on('interactionCreate', async interaction => {
         return await runVerificationProcess(interaction, options.getString('username'));
     }
 
-    // --- RE-ENGINEERED DETAILED LEADERBOARD COMMAND ---
     if (commandName === 'invites-leaderboard') {
         await interaction.deferReply();
         const serverInvs = data.invites[guildId] || {};
