@@ -25,6 +25,7 @@ const googleTTS = require('google-tts-api');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const ffmpegPath = require('ffmpeg-static'); // Added static media decoder path link
 
 const client = new Client({ 
     intents: [
@@ -283,7 +284,14 @@ client.on('messageCreate', async message => {
                 audioPlayers.set(message.guild.id, player);
             }
 
-            const resource = createAudioResource(url, { inputType: StreamType.Arbitrary });
+            // STATIC FFMPEG COMPRESSION ENFORCEMENT ENGINE LAYER
+            const resource = createAudioResource(url, {
+                inputType: StreamType.Arbitrary,
+                inlineVolume: true,
+                encoderArgs: ['-b:a', '96k']
+            });
+            
+            resource.volume.setVolume(1.0); 
             player.play(resource);
         } catch (err) {
             console.error("Voice Auto-TTS Failure:", err.message);
@@ -303,7 +311,6 @@ client.on('messageCreate', async message => {
     let triggeredProtection = false;
     let protectionReason = "";
 
-    // If the message is a Reply, we bypass specific protected user checks so they can get pinged natively
     const isDiscordReply = message.type === MessageType.Reply;
 
     if (targetConfig && !isDiscordReply) {
@@ -317,7 +324,6 @@ client.on('messageCreate', async message => {
         }
     }
 
-    // Mass mentions are always blocked regardless of format if they cross the threshold
     if ((totalMentions > 4 && !isDiscordReply) || triggeredProtection) {
         if (!protectionReason) protectionReason = "mass mentions are restricted while the anti-mention shield is active";
         try {
