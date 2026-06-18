@@ -1,13 +1,22 @@
 {
-  "name": "discord-roblox-bot",
+  "name": "roblox-discord-security-bot",
   "version": "1.0.0",
-  "description": "Roblox ranking and anti-mention bot",
+  "description": "Roblox binding and advanced server security management bot with voice TTS.",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "axios": "^1.6.0",
-    "discord.js": "^14.14.1"
-  }
+    "@discordjs/voice": "^0.17.0",
+    "axios": "^1.7.2",
+    "discord.js": "^14.15.3",
+    "ffmpeg-static": "^5.2.0",
+    "google-tts-api": "^2.0.2",
+    "libsodium-wrappers": "^0.7.15"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "author": "",
+  "license": "ISC"
 }
