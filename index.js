@@ -11,7 +11,8 @@ const {
     MessageFlags,
     PermissionFlagsBits,
     ChannelType,
-    MessageType
+    MessageType,
+    AuditLogEvent
 } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
@@ -23,11 +24,12 @@ const client = new Client({
         GatewayIntentBits.GuildMembers, 
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildInvites
+        GatewayIntentBits.GuildInvites,
+        GatewayIntentBits.GuildModeration
     ] 
 });
 
-const DB_FILE = '/app/data/bot_data.json';
+const DB_FILE = './bot_data.json';
 let data = { 
     users: {}, 
     groups: {}, 
@@ -36,7 +38,8 @@ let data = {
     protectedTargets: {},
     invites: {}, 
     logs: {},
-    security: {} 
+    security: {},
+    loggingChannels: {} 
 };
 
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
@@ -45,12 +48,9 @@ const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate";
 const cooldowns = new Map();
 const guildInvitesCache = new Map();
 const auditTracking = new Map();
-let isUpdateAllRunning = false; 
 
 function loadData() {
     try {
-        const dir = path.dirname(DB_FILE);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         if (fs.existsSync(DB_FILE)) {
             data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
             if (!data.antimention) data.antimention = {};
@@ -58,6 +58,7 @@ function loadData() {
             if (!data.invites) data.invites = {};
             if (!data.logs) data.logs = {};
             if (!data.security) data.security = {};
+            if (!data.loggingChannels) data.loggingChannels = {};
         }
     } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
@@ -93,7 +94,6 @@ const commands = [
         .addIntegerOption(o => o.setName('min-invites').setDescription('Minimum required invites').setRequired(false)),
     new SlashCommandBuilder().setName('update').setDescription('Sync ranks in this server').addUserOption(o => o.setName('user').setDescription('Admin Only: Target user to update').setRequired(false)),
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
-    new SlashCommandBuilder().setName('updateall').setDescription('Lead Command Only: Update every verified member in the server at once'),
     new SlashCommandBuilder().setName('verification-panel').setDescription('Admin Only: Post the interactive verification embed panel with buttons'),
     new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle shield settings')
         .addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
@@ -125,7 +125,17 @@ const commands = [
     new SlashCommandBuilder().setName('unmute').setDescription('Admin Only: Lift an active timeout from a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)),
     new SlashCommandBuilder().setName('say').setDescription('Make the bot echo text messages').addStringOption(o => o.setName('text').setDescription('Text message to broadcast').setRequired(true)),
     new SlashCommandBuilder().setName('giveaway').setDescription('Manage community giveaways').addSubcommand(s => s.setName('create').setDescription('Initialize a server giveaway package')),
-    new SlashCommandBuilder().setName('tickets').setDescription('Open or configuration process helper ticket pipelines')
+    new SlashCommandBuilder().setName('tickets').setDescription('Open or configuration process helper ticket pipelines'),
+    new SlashCommandBuilder().setName('logs-setup').setDescription('Admin Only: Setup output pipelines for logging operations')
+        .addStringOption(o => o.setName('category').setDescription('The layout group target to bind').setRequired(true)
+            .addChoices(
+                { name: 'Join, Leave, Roles, Timeout, Kick & Ban Logs', value: 'joinLeave' },
+                { name: 'Moderator Message Logs (Edit/Delete)', value: 'moderator' },
+                { name: 'System Commands & Purges', value: 'system' }
+            ))
+        .addChannelOption(o => o.setName('target-channel').setDescription('The channel file system pointer destination').setRequired(true)),
+    new SlashCommandBuilder().setName('purge').setDescription('Moderator Only: Bulk clear modern text parameters from this text channel')
+        .addIntegerOption(o => o.setName('amount').setDescription('Target line threshold data range to eliminate (Max: 100)').setRequired(true))
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
@@ -147,11 +157,13 @@ client.once('ready', async () => {
     } catch (e) { console.error('Command registration failed:', e); }
 });
 
-client.on('inviteCreate', invite => {
-    const cache = guildInvitesCache.get(invite.guild.id);
-    if (cache) cache.set(invite.code, invite.uses);
-});
+function getLogChannel(guild, type) {
+    const guildConfig = data.loggingChannels?.[guild.id];
+    if (!guildConfig || !guildConfig[type]) return null;
+    return guild.channels.cache.get(guildConfig[type]);
+}
 
+// --- PIPELINE 1: JOINS, LEAVES, ROLES, TIMEOUTS, KICKS & BANS ---
 client.on('guildMemberAdd', async member => {
     if (data.security[member.guild.id]?.beastMode) {
         try {
@@ -188,6 +200,21 @@ client.on('guildMemberAdd', async member => {
         data.logs[member.id] = { inviter: usedBy, code: inviteCodeUsed };
         saveData();
     }
+
+    const channel = getLogChannel(member.guild, 'joinLeave');
+    if (channel) {
+        const embed = new EmbedBuilder()
+            .setTitle("📥 Member Joined")
+            .setColor(0x2ECC71)
+            .setThumbnail(member.user.displayAvatarURL())
+            .addFields(
+                { name: "User", value: `${member.user.tag} (<@${member.id}>)`, inline: true },
+                { name: "Invite Used", value: inviteCodeUsed ? `\`${inviteCodeUsed}\`` : "Unknown/Vanity", inline: true },
+                { name: "Inviter", value: usedBy !== "Unknown" ? `<@${usedBy}>` : "Unknown", inline: true }
+            )
+            .setTimestamp();
+        channel.send({ embeds: [embed] }).catch(() => {});
+    }
 });
 
 client.on('guildMemberRemove', async member => {
@@ -196,34 +223,185 @@ client.on('guildMemberRemove', async member => {
         data.invites[member.guild.id][log.inviter].left += 1;
         saveData();
     }
+
+    const channel = getLogChannel(member.guild, 'joinLeave');
+    if (channel) {
+        setTimeout(async () => {
+            const auditLogs = await member.guild.fetchAuditLogs({ limit: 1 }).catch(() => null);
+            const kickLog = auditLogs?.entries.first();
+            const isKick = kickLog && kickLog.action === AuditLogEvent.MemberKick && kickLog.target.id === member.id && (Date.now() - kickLog.createdTimestamp < 10000);
+
+            if (isKick) {
+                const embed = new EmbedBuilder()
+                    .setTitle("👢 Member Kicked")
+                    .setColor(0xE67E22)
+                    .addFields(
+                        { name: "Target Member", value: `${member.user.tag} (${member.id})` },
+                        { name: "Executed By", value: `<@${kickLog.executor.id}>` },
+                        { name: "Reason", value: kickLog.reason || "No explicit reason specified." }
+                    )
+                    .setTimestamp();
+                return channel.send({ embeds: [embed] }).catch(() => {});
+            }
+
+            const embed = new EmbedBuilder()
+                .setTitle("📤 Member Left")
+                .setColor(0x95A5A6)
+                .addFields({ name: "User Identity", value: `${member.user.tag} (<@${member.id}>)` })
+                .setTimestamp();
+            channel.send({ embeds: [embed] }).catch(() => {});
+        }, 2000);
+    }
 });
 
-function incrementSecurityTrigger(guildId) {
-    if (!data.security[guildId]) data.security[guildId] = { enabled: true, beastMode: false, limit: 4 };
-    if (!data.security[guildId].enabled) return;
+client.on('guildBanAdd', async ban => {
+    const channel = getLogChannel(ban.guild, 'joinLeave');
+    if (channel) {
+        const auditLogs = await ban.guild.fetchAuditLogs({ limit: 1, type: AuditLogEvent.MemberBanAdd }).catch(() => null);
+        const banLog = auditLogs?.entries.first();
+        
+        const embed = new EmbedBuilder()
+            .setTitle("🚨 Member Banned")
+            .setColor(0xE74C3C)
+            .addFields(
+                { name: "User Profile Target", value: `${ban.user.tag} (${ban.user.id})` },
+                { name: "Moderator Processing", value: banLog ? `<@${banLog.executor.id}>` : "Unknown" },
+                { name: "Reason", value: ban.reason || "No structural reason designated." }
+            )
+            .setTimestamp();
+        channel.send({ embeds: [embed] }).catch(() => {});
+    }
+});
 
-    const now = Date.now();
-    if (!auditTracking.has(guildId)) auditTracking.set(guildId, []);
-    const timestamps = auditTracking.get(guildId);
-    timestamps.push(now);
-    const dynamicFilter = timestamps.filter(time => now - time < 15000);
-    auditTracking.set(guildId, dynamicFilter);
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+    const channel = getLogChannel(newMember.guild, 'joinLeave');
+    if (!channel) return;
 
-    const criticalThreshold = data.security[guildId].limit || 4;
-    if (dynamicFilter.length >= criticalThreshold && !data.security[guildId].beastMode) {
-        data.security[guildId].beastMode = true;
-        saveData();
-        const channel = client.guilds.cache.get(guildId).channels.cache.find(c => c.isTextBased());
-        if (channel) {
-            channel.send(`🚨 **SECURITY ALERT:** Rapid structural deletions detected (${dynamicFilter.length}/${criticalThreshold})! **BEAST MODE ENABLED.** Invites are paused, and entry points are locked down.`);
+    // 1. Check for Timeout Configuration Changes
+    const oldTimeout = oldMember.communicationDisabledUntilTimestamp;
+    const newTimeout = newMember.communicationDisabledUntilTimestamp;
+
+    if (oldTimeout !== newTimeout) {
+        if (newTimeout && newTimeout > Date.now()) {
+            const durationMs = newTimeout - Date.now();
+            const durationMins = Math.round(durationMs / 60000);
+            
+            const embed = new EmbedBuilder()
+                .setTitle("⏳ Member Timed Out")
+                .setColor(0xE67E22)
+                .addFields(
+                    { name: "Target User", value: `${newMember.user.tag} (<@${newMember.id}>)` },
+                    { name: "Duration", value: `\`${durationMins} minutes\`` }
+                )
+                .setTimestamp();
+            channel.send({ embeds: [embed] }).catch(() => {});
+        } else if (oldTimeout && !newTimeout) {
+            const embed = new EmbedBuilder()
+                .setTitle("🔊 Timeout Removed")
+                .setColor(0x2ECC71)
+                .addFields({ name: "Target User", value: `${newMember.user.tag} (<@${newMember.id}>)` })
+                .setTimestamp();
+            channel.send({ embeds: [embed] }).catch(() => {});
         }
     }
+
+    // 2. Check for Role Variations
+    const addedRoles = newMember.roles.cache.filter(role => !oldMember.roles.cache.has(role.id));
+    const removedRoles = oldMember.roles.cache.filter(role => !newMember.roles.cache.has(role.id));
+
+    if (addedRoles.size > 0 || removedRoles.size > 0) {
+        const embed = new EmbedBuilder()
+            .setTitle("🛡️ Member Roles Updated")
+            .setColor(0x3498DB)
+            .setDescription(`Modified variables found for tracking target: <@${newMember.id}>`)
+            .setTimestamp();
+
+        if (addedRoles.size > 0) {
+            embed.addFields({ name: "Roles Assigned", value: addedRoles.map(r => `<@&${r.id}>`).join(', ') });
+        }
+        if (removedRoles.size > 0) {
+            embed.addFields({ name: "Roles Revoked", value: removedRoles.map(r => `<@&${r.id}>`).join(', ') });
+        }
+        channel.send({ embeds: [embed] }).catch(() => {});
+    }
+});
+
+// --- PIPELINE 2: CHAT CONTEXT MODERATOR PROTECTION (EDIT/DELETE) ---
+client.on('messageDelete', async message => {
+    if (!message.guild || message.author?.bot) return;
+    const channel = getLogChannel(message.guild, 'moderator');
+    if (!channel) return;
+
+    const embed = new EmbedBuilder()
+        .setTitle("🗑️ Message Deleted")
+        .setColor(0xE74C3C)
+        .addFields(
+            { name: "Author Profile", value: `<@${message.author.id}> (${message.author.tag})`, inline: true },
+            { name: "Channel Location", value: `<#${message.channel.id}>`, inline: true },
+            { name: "Raw Content Destroyed", value: message.content || "*[No structural content layout captured]*" }
+        )
+        .setTimestamp();
+    channel.send({ embeds: [embed] }).catch(() => {});
+});
+
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+    if (!oldMessage.guild || oldMessage.author?.bot || oldMessage.content === newMessage.content) return;
+    const channel = getLogChannel(oldMessage.guild, 'moderator');
+    if (!channel) return;
+
+    const embed = new EmbedBuilder()
+        .setTitle("📝 Message Edited")
+        .setColor(0xF1C40F)
+        .addFields(
+            { name: "Author Profile", value: `<@${oldMessage.author.id}>`, inline: true },
+            { name: "Channel Location", value: `<#${oldMessage.channel.id}>`, inline: true },
+            { name: "Original Context String", value: oldMessage.content || "*Empty String*" },
+            { name: "Revised Context String", value: newMessage.content || "*Empty String*" }
+        )
+        .setTimestamp();
+    channel.send({ embeds: [embed] }).catch(() => {});
+});
+
+// --- PIPELINE 3: SERVER STRUCTURE MANAGEMENT UPDATES ---
+function logSystemAction(guild, title, fields) {
+    const channel = getLogChannel(guild, 'system');
+    if (!channel) return;
+    const embed = new EmbedBuilder().setTitle(title).setColor(0x9B59B6).setTimestamp();
+    if (fields && fields.length) embed.addFields(fields);
+    channel.send({ embeds: [embed] }).catch(() => {});
 }
 
-client.on('channelDelete', channel => { if (channel.guild) incrementSecurityTrigger(channel.guild.id); });
-client.on('roleDelete', role => { if (role.guild) incrementSecurityTrigger(role.guild.id); });
+client.on('channelCreate', channel => {
+    if (channel.guild) logSystemAction(channel.guild, "🆕 Channel Created", [{ name: "Channel Details", value: `${channel.name} (<#${channel.id}>)` }]);
+});
+
+client.on('channelDelete', channel => {
+    if (channel.guild) {
+        incrementSecurityTrigger(channel.guild.id);
+        logSystemAction(channel.guild, "❌ Channel Removed", [{ name: "Channel Name Trace", value: `\`${channel.name}\` (${channel.id})` }]);
+    }
+});
+
+client.on('channelUpdate', (oldChannel, newChannel) => {
+    if (!newChannel.guild) return;
+    let changes = [];
+    if (oldChannel.name !== newChannel.name) changes.push({ name: "Name Renamed", value: `\`${oldChannel.name}\` ➡️ \`${newChannel.name}\`` });
+    if (oldChannel.topic !== newChannel.topic) changes.push({ name: "Topic Updated", value: `Before: *${oldChannel.topic || "None"}*\nAfter: *${newChannel.topic || "None"}*` });
+    
+    if (changes.length > 0) {
+        logSystemAction(newChannel.guild, "⚙️ Channel Structural Modification Update", [
+            { name: "Channel Target Profile", value: `<#${newChannel.id}>` },
+            ...changes
+        ]);
+    }
+});
 
 // --- AUTOMATED CHAT MONITORING ENGINE ---
+client.on('inviteCreate', invite => {
+    const cache = guildInvitesCache.get(invite.guild.id);
+    if (cache) cache.set(invite.code, invite.uses);
+});
+
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
@@ -232,7 +410,6 @@ client.on('messageCreate', async message => {
         return message.channel.send(`⚙️ **[SYSTEM OPERATION EXECUTION]**: Target confirmation sequence acknowledged. Preparing background processing data packets...`);
     }
 
-    // --- ANTI-MENTION PROTECTION LAYER WITH REPLY HOOK EXEMPTION ---
     const isEnabled = data.antimention ? data.antimention[message.guild.id] : false;
     if (!isEnabled) return;
 
@@ -267,6 +444,30 @@ client.on('messageCreate', async message => {
         } catch (err) { console.log(err.message); }
     }
 });
+
+function incrementSecurityTrigger(guildId) {
+    if (!data.security[guildId]) data.security[guildId] = { enabled: true, beastMode: false, limit: 4 };
+    if (!data.security[guildId].enabled) return;
+
+    const now = Date.now();
+    if (!auditTracking.has(guildId)) auditTracking.set(guildId, []);
+    const timestamps = auditTracking.get(guildId);
+    timestamps.push(now);
+    const dynamicFilter = timestamps.filter(time => now - time < 15000);
+    auditTracking.set(guildId, dynamicFilter);
+
+    const criticalThreshold = data.security[guildId].limit || 4;
+    if (dynamicFilter.length >= criticalThreshold && !data.security[guildId].beastMode) {
+        data.security[guildId].beastMode = true;
+        saveData();
+        const channel = client.guilds.cache.get(guildId).channels.cache.find(c => c.isTextBased());
+        if (channel) {
+            channel.send(`🚨 **SECURITY ALERT:** Rapid structural deletions detected (${dynamicFilter.length}/${criticalThreshold})! **BEAST MODE ENABLED.** Invites are paused, and entry points are locked down.`);
+        }
+    }
+}
+
+client.on('roleDelete', role => { if (role.guild) incrementSecurityTrigger(role.guild.id); });
 
 async function applyUserRankMutations(member, robloxId, bindConfig, username) {
     if (bindConfig.nicknameFormat) {
@@ -337,6 +538,41 @@ async function runUpdateProcess(interaction, targetUser) {
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel, guild } = interaction;
+
+    if (commandName === 'logs-setup') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        const category = options.getString('category');
+        const targetChannel = options.getChannel('target-channel');
+
+        if (!data.loggingChannels) data.loggingChannels = {};
+        if (!data.loggingChannels[guildId]) data.loggingChannels[guildId] = { joinLeave: null, moderator: null, system: null };
+
+        data.loggingChannels[guildId][category] = targetChannel.id;
+        saveData();
+
+        return interaction.reply(`✅ Successfully mapped log profile category **${category}** to channel context pipeline <#${targetChannel.id}>.`);
+    }
+
+    if (commandName === 'purge') {
+        if (!member.permissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        const amount = options.getInteger('amount');
+        if (amount < 1 || amount > 100) return interaction.reply({ content: "❌ Value configuration constraint violation. Select a threshold from 1 to 100.", flags: [MessageFlags.Ephemeral] });
+
+        await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+        try {
+            const deleted = await channel.bulkDelete(amount, true);
+            interaction.editReply(`🧹 Complete. Cleaned up \`${deleted.size}\` messages from the display screen.`);
+            
+            logSystemAction(guild, "🧹 Channel Purged Execution", [
+                { name: "Moderator Processing", value: `<@${interaction.user.id}>`, inline: true },
+                { name: "Channel Location", value: `<#${channel.id}>`, inline: true },
+                { name: "Line Total Purged", value: `\`${deleted.size}\` entries`, inline: true }
+            ]);
+        } catch (err) {
+            interaction.editReply(`❌ Data deletion network error: ${err.message}`);
+        }
+        return;
+    }
 
     if (commandName === 'security-config') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Access Denied.");
@@ -486,6 +722,14 @@ client.on('interactionCreate', async interaction => {
         if (!member.permissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await channel.send(options.getString('text'));
         return interaction.reply({ content: "Broadcast sent.", flags: [MessageFlags.Ephemeral] });
+    }
+
+    if (commandName === 'giveaway') {
+        return interaction.reply({ content: "🎟️ Giveaway framework initialized.", flags: [MessageFlags.Ephemeral] });
+    }
+
+    if (commandName === 'tickets') {
+        return interaction.reply({ content: "🎟️ Tickets panel active.", flags: [MessageFlags.Ephemeral] });
     }
 
     if (commandName === 'verification-panel') {
