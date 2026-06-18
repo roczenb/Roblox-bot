@@ -1,4 +1,3 @@
-process.env.FFMPEG_PATH = require('ffmpeg-static');
 const { 
     Client, 
     GatewayIntentBits, 
@@ -26,7 +25,7 @@ const googleTTS = require('google-tts-api');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const ffmpegPath = require('ffmpeg-static'); // Added static media decoder path link
+const ffmpegPath = require('ffmpeg-static'); // Direct pointer to the binary package
 
 const client = new Client({ 
     intents: [
@@ -281,18 +280,22 @@ client.on('messageCreate', async message => {
             let player = audioPlayers.get(message.guild.id);
             if (!player) {
                 player = createAudioPlayer();
-                connection.subscribe(player);
                 audioPlayers.set(message.guild.id, player);
             }
+            
+            connection.subscribe(player);
 
-            // STATIC FFMPEG COMPRESSION ENFORCEMENT ENGINE LAYER
+            // FORCE PACKETIZATION ROUTING THROUGH EXPLICIT LOCAL FFMPEG BINARY
             const resource = createAudioResource(url, {
                 inputType: StreamType.Arbitrary,
                 inlineVolume: true,
-                encoderArgs: ['-b:a', '96k']
+                ffmpegPath: ffmpegPath
             });
             
-            resource.volume.setVolume(1.0); 
+            if (resource.volume) {
+                resource.volume.setVolume(1.0);
+            }
+            
             player.play(resource);
         } catch (err) {
             console.error("Voice Auto-TTS Failure:", err.message);
