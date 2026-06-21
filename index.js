@@ -12,7 +12,8 @@ const {
     PermissionFlagsBits,
     ChannelType,
     MessageType,
-    AuditLogEvent
+    AuditLogEvent,
+    StringSelectMenuBuilder
 } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
@@ -25,7 +26,8 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildInvites,
-        GatewayIntentBits.GuildModeration
+        GatewayIntentBits.GuildModeration,
+        GatewayIntentBits.GuildVoiceStates
     ] 
 });
 
@@ -39,7 +41,11 @@ let data = {
     invites: {}, 
     logs: {},
     security: {},
-    loggingChannels: {} 
+    loggingChannels: {},
+    xp: {},
+    globalBlacklist: { users: [], servers: [] },
+    shouts: {},
+    tickets: {}
 };
 
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
@@ -48,6 +54,7 @@ const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate";
 const cooldowns = new Map();
 const guildInvitesCache = new Map();
 const auditTracking = new Map();
+const activeGiveaways = new Map();
 
 function loadData() {
     try {
@@ -59,6 +66,10 @@ function loadData() {
             if (!data.logs) data.logs = {};
             if (!data.security) data.security = {};
             if (!data.loggingChannels) data.loggingChannels = {};
+            if (!data.xp) data.xp = {};
+            if (!data.globalBlacklist) data.globalBlacklist = { users: [], servers: [] };
+            if (!data.shouts) data.shouts = {};
+            if (!data.tickets) data.tickets = {};
         }
     } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
@@ -125,8 +136,6 @@ const commands = [
     new SlashCommandBuilder().setName('timeout').setDescription('Admin Only: Timeout a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)).addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true)),
     new SlashCommandBuilder().setName('unmute').setDescription('Admin Only: Lift an active timeout from a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)),
     new SlashCommandBuilder().setName('say').setDescription('Make the bot echo text messages').addStringOption(o => o.setName('text').setDescription('Text message to broadcast').setRequired(true)),
-    new SlashCommandBuilder().setName('giveaway').setDescription('Manage community giveaways').addSubcommand(s => s.setName('create').setDescription('Initialize a server giveaway package')),
-    new SlashCommandBuilder().setName('tickets').setDescription('Open or configuration process helper ticket pipelines'),
     new SlashCommandBuilder().setName('logs-setup').setDescription('Admin Only: Setup output pipelines for logging operations')
         .addStringOption(o => o.setName('category').setDescription('The layout group target to bind').setRequired(true)
             .addChoices(
@@ -136,12 +145,30 @@ const commands = [
             ))
         .addChannelOption(o => o.setName('target-channel').setDescription('The channel file system pointer destination').setRequired(true)),
     new SlashCommandBuilder().setName('purge').setDescription('Moderator Only: Bulk clear modern text parameters from this text channel')
-        .addIntegerOption(o => o.setName('amount').setDescription('Target line threshold data range to eliminate (Max: 100)').setRequired(true))
+        .addIntegerOption(o => o.setName('amount').setDescription('Target line threshold data range to eliminate (Max: 100)').setRequired(true)),
+    
+    // NEW EXTENDED ADVANCED FUNCTIONALITY COMMAND MODULES
+    new SlashCommandBuilder().setName('rank-xp').setDescription('View your current server operational deployment experience level points').addUserOption(o => o.setName('target').setDescription('Target user profiling evaluation').setRequired(false)),
+    new SlashCommandBuilder().setName('global-blacklist').setDescription('Roczenbeissel Exclusive: Manage structural master defense matrix parameters')
+        .addStringOption(o => o.setName('action').setDescription('Select system execution target').setRequired(true).addChoices({ name: 'Add User', value: 'addUser' }, { name: 'Add Server', value: 'addServer' }, { name: 'Clear Profile', value: 'clear' }))
+        .addStringOption(o => o.setName('id').setDescription('Target data payload string ID identification variable').setRequired(true)),
+    new SlashCommandBuilder().setName('giveaway').setDescription('Initialize an advanced community reward distribution engine')
+        .addStringOption(o => o.setName('prize').setDescription('What item/role is up for collection entry points').setRequired(true))
+        .addIntegerOption(o => o.setName('duration').setDescription('Time threshold parameter duration in minutes').setRequired(true))
+        .addIntegerOption(o => o.setName('winners').setDescription('Maximum allowed successful targets returned').setRequired(true))
+        .addIntegerOption(o => o.setName('min-invites').setDescription('Gate parameter requiring minimum invite metrics').setRequired(false)),
+    new SlashCommandBuilder().setName('tickets-setup').setDescription('Admin Only: Deploy an interactive multi-category ticket terminal dashboard pipeline'),
+    new SlashCommandBuilder().setName('shout-bind-channel').setDescription('Admin Only: Bind the Roblox Group live feed shout mirror utility onto a text channel').addChannelOption(o => o.setName('target').setDescription('Target line pipeline tracking node destination').setRequired(true))
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
     for (const [guildId, guild] of client.guilds.cache) {
+        if (data.globalBlacklist.servers.includes(guildId)) {
+            console.log(`🚨 Auto-leaving blacklisted guild layout: ${guild.name} (${guildId})`);
+            await guild.leave().catch(() => {});
+            continue;
+        }
         try {
             const firstInvites = await guild.invites.fetch();
             guildInvitesCache.set(guild.id, new Map(firstInvites.map(invite => [invite.code, invite.uses])));
@@ -150,14 +177,45 @@ client.once('ready', async () => {
     try {
         const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
         console.log('Started refreshing application (global) / commands...');
-        
-        await rest.put(
-            Routes.applicationCommands(client.user.id),
-            { body: commands }
-        );
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
         console.log('All slash commands are synced globally!');
     } catch (e) { console.error('Command registration failed:', e); }
+
+    // INITIALIZE ROBLOX SHOUT AUTO-MIRROR FEED POLLING CYCLE ENGINE LOOP
+    setInterval(pollRobloxShoutFeeds, 60000);
 });
+
+async function pollRobloxShoutFeeds() {
+    for (const [guildId, groupId] of Object.entries(data.groups || {})) {
+        const channelId = data.shouts?.[guildId];
+        if (!channelId) continue;
+        const targetGuild = client.guilds.cache.get(guildId);
+        if (!targetGuild) continue;
+        const targetChannel = targetGuild.channels.cache.get(channelId);
+        if (!targetChannel) continue;
+
+        try {
+            const res = await axios.get(`https://groups.roproxy.com/v1/groups/${groupId}`);
+            const shout = res.data.shout;
+            if (!shout) continue;
+
+            const previousShoutBody = data.shouts[`${guildId}-last`] || "";
+            if (shout.body !== previousShoutBody) {
+                data.shouts[`${guildId}-last`] = shout.body;
+                saveData();
+
+                const embed = new EmbedBuilder()
+                    .setTitle("📢 New Roblox Group Transmission")
+                    .setColor(0x00FFCC)
+                    .setAuthor({ name: res.data.name, iconURL: `https://www.roblox.com/asset-thumbnail/image?assetId=${groupId}&width=150&height=150&format=png` })
+                    .setDescription(shout.body)
+                    .addFields({ name: "Posted By:", value: shout.poster.username, inline: true })
+                    .setTimestamp(new Date(shout.updated));
+                await targetChannel.send({ embeds: [embed] }).catch(() => {});
+            }
+        } catch (err) { console.error(`Error polling group ${groupId}:`, err.message); }
+    }
+}
 
 function getLogChannel(guild, type) {
     const guildConfig = data.loggingChannels?.[guild.id];
@@ -167,6 +225,14 @@ function getLogChannel(guild, type) {
 
 // --- PIPELINE 1: JOINS, LEAVES, ROLES, TIMEOUTS, KICKS & BANS ---
 client.on('guildMemberAdd', async member => {
+    if (data.globalBlacklist.users.includes(member.id)) {
+        try {
+            await member.send("🛑 Access Denied: You are globally blacklisted from utilizing software instances controlled by Roczenbeissel structural security parameters.");
+            await member.ban({ reason: "Global Network Defense Matrix Blacklist Verification Match Trigger" });
+            return;
+        } catch (e) { console.error(e); }
+    }
+
     if (data.security[member.guild.id]?.beastMode) {
         try {
             await member.send("⚠️ This server is under high security lockdown. Entrance invitations are paused.");
@@ -216,6 +282,13 @@ client.on('guildMemberAdd', async member => {
             )
             .setTimestamp();
         channel.send({ embeds: [embed] }).catch(() => {});
+    }
+});
+
+client.on('guildCreate', async guild => {
+    if (data.globalBlacklist.servers.includes(guild.id)) {
+        console.log(`🚨 Joined blacklisted guild. Leaving: ${guild.name}`);
+        await guild.leave().catch(() => {});
     }
 });
 
@@ -405,6 +478,28 @@ client.on('inviteCreate', invite => {
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
+    // INTERACTIVE LIVE PROGRESSION SYSTEM (XP ACCUMULATION ENGINE)
+    if (!data.xp[message.guild.id]) data.xp[message.guild.id] = {};
+    if (!data.xp[message.guild.id][message.author.id]) {
+        data.xp[message.guild.id][message.author.id] = { xp: 0, level: 0 };
+    }
+    
+    let userXpProfile = data.xp[message.guild.id][message.author.id];
+    userXpProfile.xp += Math.floor(Math.random() * 6) + 10;
+    let nextLevelThresh = (userXpProfile.level + 1) * 350;
+    
+    if (userXpProfile.xp >= nextLevelThresh) {
+        userXpProfile.level += 1;
+        saveData();
+        const upEmbed = new EmbedBuilder()
+            .setTitle("🎖️ Military Activity Promotion")
+            .setColor(0xF1C40F)
+            .setDescription(`Congratulations <@${message.author.id}>, you have achieved deployment status milestone **Level ${userXpProfile.level}** through operational activity metric tracking!`);
+        message.channel.send({ embeds: [upEmbed] }).then(m => setTimeout(() => m.delete().catch(() => {}), 10000));
+    } else {
+        saveData();
+    }
+
     if (message.content.startsWith('?ban') || message.content.startsWith('?kick') || message.content.startsWith('?timeout')) {
         if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
         return message.channel.send(`⚙️ **[SYSTEM OPERATION EXECUTION]**: Target confirmation sequence acknowledged. Preparing background processing data packets...`);
@@ -536,6 +631,84 @@ async function runUpdateProcess(interaction, targetUser) {
 }
 
 client.on('interactionCreate', async interaction => {
+    // RESOLVE INTERACTIVE SYSTEM BACKEND BUTTON AND DROPDOWN PIPELINES
+    if (interaction.isButton()) {
+        const { customId, guild, member, user } = interaction;
+        
+        if (customId === 'panel_link_btn') {
+            return interaction.reply({ content: "Please run the modern slash platform utility: `/verify [your_roblox_username]` directly in line text chat.", flags: [MessageFlags.Ephemeral] });
+        }
+        if (customId === 'panel_update_btn') {
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+            return await runUpdateProcess(interaction, user);
+        }
+        
+        // GIVEAWAY ENGINE INTERACTION ROUTER ENTRY PACKET
+        if (customId.startsWith('giveaway_join_')) {
+            const gId = customId.replace('giveaway_join_', '');
+            const giveaway = activeGiveaways.get(gId);
+            if (!giveaway) return interaction.reply({ content: "❌ This community reward matrix distribution context has already terminated.", flags: [MessageFlags.Ephemeral] });
+            
+            if (giveaway.minInvites > 0) {
+                const userInvs = data.invites[guild.id]?.[user.id] || { regular: 0, left: 0 };
+                const net = userInvs.regular - userInvs.left;
+                if (net < giveaway.minInvites) {
+                    return interaction.reply({ content: `❌ Requirement mismatch: This giveaway requires structural proof of at least **${giveaway.minInvites} validation invites**. You possess \`${net}\`.`, flags: [MessageFlags.Ephemeral] });
+                }
+            }
+            if (giveaway.participants.includes(user.id)) {
+                return interaction.reply({ content: "ℹ️ Your profile trace is already documented inside this entry collection container.", flags: [MessageFlags.Ephemeral] });
+            }
+            giveaway.participants.push(user.id);
+            return interaction.reply({ content: "🎉 Entry sequence logged successfully! Best of luck in the random raffle pool draws.", flags: [MessageFlags.Ephemeral] });
+        }
+
+        // TICKET CLOSE OPERATION ACTION ROUTER
+        if (customId === 'close_ticket_btn') {
+            await interaction.reply("🔒 Archiving channel stream pipelines and capturing database thread history...");
+            const messages = await interaction.channel.messages.fetch({ limit: 100 });
+            let transcript = messages.reverse().map(m => `[${m.createdAt.toISOString()}] ${m.author.tag}: ${m.content}`).join('\n');
+            
+            const logChannel = getLogChannel(guild, 'system');
+            if (logChannel) {
+                const file = Buffer.from(transcript, 'utf-8');
+                await logChannel.send({ content: `🎟️ **Ticket Thread Archived:** File history logged for ticket channel reference context \`${interaction.channel.name}\`.`, files: [{ attachment: file, name: `${interaction.channel.name}-archive.txt` }] });
+            }
+            setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
+            return;
+        }
+    }
+
+    if (interaction.isStringSelectMenu()) {
+        const { customId, values, guild, member, user } = interaction;
+        if (customId === 'ticket_category_select') {
+            const chosenType = values[0];
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+            
+            const channelTicket = await guild.channels.create({
+                name: `ticket-${chosenType}-${user.username.slice(0,4)}`,
+                type: ChannelType.GuildText,
+                permissionOverwrites: [
+                    { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+                    { id: user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
+                ]
+            });
+
+            const tEmbed = new EmbedBuilder()
+                .setTitle(`🎫 Private Support Ticket Opened`)
+                .setColor(0xE67E22)
+                .setDescription(`Greetings <@${user.id}>. This private channel pipeline has been configured to process variables aligned with **${chosenType.toUpperCase()}** tracking.\nOur active support staff has been alerted.`)
+                .setTimestamp();
+                
+            const closeRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('close_ticket_btn').setLabel('Close File Pipeline').setStyle(ButtonStyle.Danger)
+            );
+
+            await channelTicket.send({ embeds: [tEmbed], components: [closeRow] });
+            return interaction.editReply(`✅ Ticket channel generated successfully. Redirect destination link coordinates: <#${channelTicket.id}>`);
+        }
+    }
+
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel, guild } = interaction;
 
@@ -546,21 +719,142 @@ client.on('interactionCreate', async interaction => {
             .setThumbnail(client.user.displayAvatarURL())
             .setDescription("Detailed software metadata parameters and recent build adjustments.")
             .addFields(
-                { name: "👑 Bot Creator", value: "Developed by AI Developer Studio", inline: true },
-                { name: "📦 Software Version", value: "`v2.4.0-Stable`", inline: true },
+                { name: "👑 Bot Creator / Owner", value: "**Roczenbeissel**", inline: true },
+                { name: "📦 Software Version", value: "`v3.0.0-Elite-Beast`", inline: true },
                 { name: "🟢 Library Environment", value: `\`discord.js v14\``, inline: true },
-                { name: "📅 Last Production Update", value: `<t:1781992336:F>`, inline: false }, // Dynamic Discord timestamp format
-                { name: "🛠️ Recent Build Patch Notes", value: 
-                    "• Added global application command layout pipelines.\n" +
-                    "• Integrated dynamic communication timeout tracking alerts.\n" +
-                    "• Patched invite data validation memory mapping bugs.\n" +
-                    "• Optimized Roblox network routing error recovery wrappers." 
+                { name: "📅 Last Production Update", value: `<t:1781992336:F>`, inline: false },
+                { name: "🛠️ Advanced Feature Patch Updates", value: 
+                    "• Integrated dynamic user background chat network leveling metrics (XP System).\n" +
+                    "• Built complete dynamic select-menu multi-category Support Ticket Engines.\n" +
+                    "• Programmed requirement-gated server Giveaway processing loops with database sync arrays.\n" +
+                    "• Enabled Roczenbeissel exclusive central network Global Blacklist tracking overrides.\n" +
+                    "• Activated background Roblox Group live feed shout mirroring systems using automated polling hooks." 
                 }
             )
-            .setFooter({ text: `${client.user.username} Operational Status: Optimal`, iconURL: client.user.displayAvatarURL() })
+            .setFooter({ text: `System Mainframe Operational Status: Optimal`, iconURL: client.user.displayAvatarURL() })
             .setTimestamp();
 
         return interaction.reply({ embeds: [versionEmbed] });
+    }
+
+    if (commandName === 'global-blacklist') {
+        if (interaction.user.username !== 'roczenbeissel' && interaction.user.id !== '338427976192229377') { // Security safety locks
+            return interaction.reply({ content: "❌ Structural Constraint Violation: This command configuration is strictly hardcoded to the master developer signature of Roczenbeissel.", flags: [MessageFlags.Ephemeral] });
+        }
+        const action = options.getString('action');
+        const targetId = options.getString('id');
+
+        if (action === 'addUser') {
+            data.globalBlacklist.users.push(targetId);
+            saveData();
+            return interaction.reply(`🚨 **Global Security Lock:** Target User ID \`${targetId}\` added to system ban matrices.`);
+        } else if (action === 'addServer') {
+            data.globalBlacklist.servers.push(targetId);
+            saveData();
+            const badGuild = client.guilds.cache.get(targetId);
+            if (badGuild) await badGuild.leave().catch(() => {});
+            return interaction.reply(`🚨 **Global Security Lock:** Target Guild ID \`${targetId}\` blacklisted. Instigating auto-severance procedures.`);
+        } else {
+            data.globalBlacklist = { users: [], servers: [] };
+            saveData();
+            return interaction.reply("✅ Global blacklists reset.");
+        }
+    }
+
+    if (commandName === 'rank-xp') {
+        const target = options.getUser('target') || interaction.user;
+        const profile = data.xp?.[guildId]?.[target.id] || { xp: 0, level: 0 };
+        const nextLevelThresh = (profile.level + 1) * 350;
+
+        const embed = new EmbedBuilder()
+            .setTitle(`🎖️ Deployment Status Evaluation`)
+            .setColor(0x3498DB)
+            .addFields(
+                { name: "Target Soldier", value: `<@${target.id}>`, inline: true },
+                { name: "Current Level", value: `\`Level ${profile.level}\``, inline: true },
+                { name: "Experience points", value: `\`${profile.xp} / ${nextLevelThresh} XP\``, inline: false }
+            );
+        return interaction.reply({ embeds: [embed] });
+    }
+
+    if (commandName === 'shout-bind-channel') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Access Denied.");
+        const targetChannel = options.getChannel('target');
+        if (!data.shouts) data.shouts = {};
+        data.shouts[guildId] = targetChannel.id;
+        saveData();
+        return interaction.reply(`✅ Successfully mapped the Roblox live shout mirror transmission channel onto <#${targetChannel.id}>.`);
+    }
+
+    if (commandName === 'giveaway') {
+        if (!member.permissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply("❌ Access Denied.");
+        const prize = options.getString('prize');
+        const duration = options.getInteger('duration');
+        const winnersCount = options.getInteger('winners');
+        const minInvites = options.getInteger('min-invites') || 0;
+
+        await interaction.reply("🎁 Initializing giveaway network context containers...");
+        const gId = interaction.id;
+        const giveawayConfig = { prize, winnersCount, minInvites, participants: [], channelId: channel.id };
+        activeGiveaways.set(gId, giveawayConfig);
+
+        const embed = new EmbedBuilder()
+            .setTitle("🎉 COMMUNITY REWARD DISTRIBUTION RATTLE 🎉")
+            .setColor(0xEE82EE)
+            .setDescription(`A reward distribution container has been loaded for **${prize}**!`)
+            .addFields(
+                { name: "Time Window Close:", value: `<t:${Math.floor((Date.now() + (duration * 60000)) / 1000)}:R>`, inline: true },
+                { name: "Winner Limit Targets:", value: `\`${winnersCount}\``, inline: true },
+                { name: "Invite Entry Restrictions:", value: minInvites > 0 ? `\`Requires minimum ${minInvites} invites\`` : "`None`", inline: false }
+            );
+
+        const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`giveaway_join_${gId}`).setLabel('Enter Draw').setStyle(ButtonStyle.Primary).setEmoji('🎟️')
+        );
+
+        const msg = await channel.send({ embeds: [embed], components: [row] });
+
+        setTimeout(async () => {
+            const activeObj = activeGiveaways.get(gId);
+            activeGiveaways.delete(gId);
+            if (!activeObj || !activeObj.participants.length) {
+                return channel.send(`🛑 **Giveaway Cancelled:** There were insufficient entry tracking fields logged for reward draw processing of **${prize}**.`);
+            }
+
+            let pool = activeObj.participants;
+            let chosenWinners = [];
+            for (let i = 0; i < Math.min(activeObj.winnersCount, pool.length); i++) {
+                let index = Math.floor(Math.random() * pool.length);
+                chosenWinners.push(`<@${pool[index]}>`);
+                pool.splice(index, 1);
+            }
+
+            await msg.edit({ components: [] }).catch(() => {});
+            return channel.send(`🎉 **GIVEAWAY COMPLETE:** Congratulations to ${chosenWinners.join(', ')}! You won the community drawing for **${prize}**!`);
+        }, duration * 60000);
+        return;
+    }
+
+    if (commandName === 'tickets-setup') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply("❌ Access Denied.");
+        const tEmbed = new EmbedBuilder()
+            .setTitle("📋 Military Support Request Interface Hub")
+            .setColor(0x2C3E50)
+            .setDescription("Need support infrastructure or high-ranking clearance oversight? Select an active categorical support ticket profile array down below to deploy a secure private text connection pipeline thread channel.");
+
+        const menu = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId('ticket_category_select')
+                .setPlaceholder('Establish communication file pipeline...')
+                .addOptions(
+                    { label: 'Rank Transfer Clearance Request', value: 'rank_transfer', description: 'Request rank updates aligned with cross-server migration metrics.' },
+                    { label: 'Report Malicious Activities', value: 'abuse_report', description: 'Flag a specific target matching parameters of treason or structural exploitation.' },
+                    { label: 'General Division Questions', value: 'general_help', description: 'Acquire feedback relating to server organizational parameters.' }
+                )
+        );
+
+        await channel.send({ embeds: [tEmbed], components: [menu] });
+        return interaction.reply({ content: "Operational configuration dashboard successfully anchored to visual channel metrics.", flags: [MessageFlags.Ephemeral] });
     }
 
     if (commandName === 'logs-setup') {
@@ -746,14 +1040,6 @@ client.on('interactionCreate', async interaction => {
         if (!member.permissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await channel.send(options.getString('text'));
         return interaction.reply({ content: "Broadcast sent.", flags: [MessageFlags.Ephemeral] });
-    }
-
-    if (commandName === 'giveaway') {
-        return interaction.reply({ content: "🎟️ Giveaway framework initialized.", flags: [MessageFlags.Ephemeral] });
-    }
-
-    if (commandName === 'tickets') {
-        return interaction.reply({ content: "🎟️ Tickets panel active.", flags: [MessageFlags.Ephemeral] });
     }
 
     if (commandName === 'verification-panel') {
