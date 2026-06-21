@@ -38,8 +38,9 @@ let data = {
     logs: {},
     security: {},
     autoroles: {},
-    milestoneRoles: {}, // Stores arrays of role IDs per threshold configuration mapping
-    milestoneThresholds: {} 
+    milestoneRoles: {}, 
+    milestoneThresholds: {},
+    logsChannel: {} 
 };
 
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
@@ -66,6 +67,7 @@ function loadData() {
             if (!data.autoroles) data.autoroles = {};
             if (!data.milestoneRoles) data.milestoneRoles = {};
             if (!data.milestoneThresholds) data.milestoneThresholds = {};
+            if (!data.logsChannel) data.logsChannel = {};
         }
     } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
@@ -75,6 +77,17 @@ function saveData() {
 }
 
 loadData();
+
+function sendSystemLog(guildId, logPayload) {
+    const channelId = data.logsChannel?.[guildId];
+    if (!channelId) return;
+    const guild = client.guilds.cache.get(guildId);
+    if (!guild) return;
+    const targetChannel = guild.channels.cache.get(channelId);
+    if (targetChannel && targetChannel.isTextBased()) {
+        targetChannel.send(logPayload).catch(err => console.error("Failed to route log packet:", err.message));
+    }
+}
 
 function checkCooldown(userId, commandName, seconds = 5) {
     const key = `${userId}-${commandName}`;
@@ -91,7 +104,9 @@ function checkCooldown(userId, commandName, seconds = 5) {
 }
 
 const commands = [
-    new SlashCommandBuilder().setName('verify').setDescription('Link your Roblox account globally').addStringOption(o => o.setName('username').setDescription('Username').setRequired(true)),
+    new SlashCommandBuilder().setName('verify').setDescription('Link a Roblox account globally')
+        .addStringOption(o => o.setName('username').setDescription('Username').setRequired(true))
+        .addUserOption(o => o.setName('target').setDescription('Admin Only: Target user to verify for them').setRequired(false)),
     new SlashCommandBuilder().setName('setup-group').setDescription('Link a Roblox Group ID to this server').addStringOption(o => o.setName('groupid').setDescription('Group ID').setRequired(true)),
     new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto create and bind roles sorted perfectly by chain of command hierarchy'),
     new SlashCommandBuilder().setName('bind').setDescription('Bind a specific rank to a role')
@@ -103,8 +118,10 @@ const commands = [
     new SlashCommandBuilder().setName('sync-milestones').setDescription('Admin Only: Force re-verify and evaluate batch division rules for a member').addUserOption(o => o.setName('target').setDescription('The trooper to sync tier roles for').setRequired(true)),
     new SlashCommandBuilder().setName('setup-milestones').setDescription('Admin Only: Configure multiple roles awarded to anyone AT or ABOVE a certain Roblox rank')
         .addStringOption(o => o.setName('category-name').setDescription('Label for this threshold pool (e.g. Officer Pack)').setRequired(true))
-        .addStringOption(o => o.setName('roles-list').setDescription('Comma separated list of multiple roles (e.g. @Role1, @Role2, @Role3)').setRequired(true))
+        .addStringOption(o => o.setName('roles-list').setDescription('Comma separated list of multiple roles (e.g. @Role1, @Role2)').setRequired(true))
         .addIntegerOption(o => o.setName('min-rank').setDescription('The minimum Roblox rank number required (e.g. 30)').setRequired(true)),
+    new SlashCommandBuilder().setName('setup-logs').setDescription('Admin Only: Configure which channel the bot sends moderation and invite logs to')
+        .addChannelOption(o => o.setName('channel').setDescription('The channel to receive logs').setRequired(true)),
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
     new SlashCommandBuilder().setName('updateall').setDescription('Lead Command Only: Update every verified member in the server at once'),
     new SlashCommandBuilder().setName('verification-panel').setDescription('Admin Only: Post the interactive verification embed panel with buttons'),
@@ -172,6 +189,7 @@ client.on('guildMemberAdd', async member => {
         try {
             await member.send("⚠️ This server is under high security lockdown. Entrance invitations are paused.");
             await member.kick("Beast Mode: Anti-Raid Active Protection Layer");
+            sendSystemLog(member.guild.id, `🚨 **Beast Mode Action:** Kick executed on joining user <@${member.id}> (Security Lockout).`);
             return;
         } catch (e) { console.error(e); }
     }
@@ -210,6 +228,8 @@ client.on('guildMemberAdd', async member => {
         data.invites[member.guild.id][usedBy].regular += 1;
         data.logs[member.id] = { inviter: usedBy, code: inviteCodeUsed };
         saveData();
+
+        sendSystemLog(member.guild.id, `📥 **Member Joined:** <@${member.id}> invited by <@${usedBy}> (Code: \`${inviteCodeUsed}\`).`);
     }
 });
 
@@ -218,6 +238,8 @@ client.on('guildMemberRemove', async member => {
     if (log && data.invites[member.guild.id]?.[log.inviter]) {
         data.invites[member.guild.id][log.inviter].left += 1;
         saveData();
+
+        sendSystemLog(member.guild.id, `📤 **Member Left:** <@${member.id}> (Originally invited by <@${log.inviter}>).`);
     }
 });
 
@@ -236,10 +258,10 @@ function incrementSecurityTrigger(guildId) {
     if (dynamicFilter.length >= criticalThreshold && !data.security[guildId].beastMode) {
         data.security[guildId].beastMode = true;
         saveData();
+        const msg = `🚨 **SECURITY ALERT:** Rapid structural deletions detected (${dynamicFilter.length}/${criticalThreshold})! **BEAST MODE ENABLED.** Invites are paused, and entry points are locked down.`;
+        sendSystemLog(guildId, msg);
         const channel = client.guilds.cache.get(guildId).channels.cache.find(c => c.isTextBased());
-        if (channel) {
-            channel.send(`🚨 **SECURITY ALERT:** Rapid structural deletions detected (${dynamicFilter.length}/${criticalThreshold})! **BEAST MODE ENABLED.** Invites are paused, and entry points are locked down.`);
-        }
+        if (channel) channel.send(msg);
     }
 }
 
@@ -283,6 +305,7 @@ client.on('messageCreate', async message => {
         if (!protectionReason) protectionReason = "mass mentions are restricted while the anti-mention shield is active";
         try {
             await message.delete();
+            sendSystemLog(message.guild.id, `🛡️ **Anti-Mention Shield:** Deleted message from <@${message.author.id}> in <#${message.channel.id}> due to violation: *${protectionReason}*.`);
             const warning = await message.channel.send(`⚠️ <@${message.author.id}>, ${protectionReason}.`);
             setTimeout(() => warning.delete().catch(() => {}), 5000);
         } catch (err) { console.log(err.message); }
@@ -298,30 +321,41 @@ async function applyUserRankMutations(member, robloxId, bindConfig, username) {
     }
 }
 
-async function runVerificationProcess(interaction, usernameInput) {
+async function runVerificationProcess(interaction, usernameInput, targetUser) {
     try {
         const res = await axios.post('https://users.roproxy.com/v1/usernames/users', { usernames: [usernameInput], excludeBannedUsers: true });
         if (!res.data.data.length) return interaction.editReply("❌ User not found.");
         const rId = res.data.data[0].id;
-        data.users[interaction.user.id] = rId;
+        
+        data.users[targetUser.id] = rId;
         saveData();
-        return interaction.editReply(`✅ Verified globally as Roblox ID: ${rId}`);
+
+        const logEmbed = new EmbedBuilder()
+            .setTitle("🔑 Account Verified")
+            .setColor(0x3498DB)
+            .addFields(
+                { name: "Target User:", value: `<@${targetUser.id}> (\`${targetUser.id}\`)`, inline: true },
+                { name: "Roblox Identity:", value: `\`${usernameInput}\` (\`${rId}\`)`, inline: true },
+                { name: "Verified By:", value: `<@${interaction.user.id}>`, inline: false }
+            )
+            .setTimestamp();
+        sendSystemLog(interaction.guildId, { embeds: [logEmbed] });
+
+        return interaction.editReply(`✅ Successfully verified <@${targetUser.id}> globally as Roblox ID: ${rId}`);
     } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
 }
 
 async function runUpdateProcess(interaction, targetUser) {
-    const isTargetingOther = targetUser.id !== interaction.user.id;
     const robloxId = data.users[targetUser.id];
-    if (!robloxId) return interaction.editReply(isTargetingOther ? `❌ That user has not run \`/verify\` yet.` : "❌ You need to connect your profile first.");
+    if (!robloxId) return interaction.editReply(targetUser.id !== interaction.user.id ? `❌ That user has not run \`/verify\` yet.` : "❌ You need to connect your profile first.");
     
     const serverBinds = data.binds ? data.binds[interaction.guildId] : [];
-    if (!serverBinds || !serverBinds.length) return interaction.editReply("❌ No roles are bound on this server yet.");
-    
     const userInvData = data.invites[interaction.guildId]?.[targetUser.id] || { regular: 0, left: 0 };
     const netInvites = userInvData.regular - userInvData.left;
 
     try {
         let added = [];
+        let removed = [];
         const targetMember = await interaction.guild.members.fetch(targetUser.id);
         const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
         const uLookup = await axios.get(`https://users.roproxy.com/v1/users/${robloxId}`);
@@ -330,15 +364,18 @@ async function runUpdateProcess(interaction, targetUser) {
         const sRolesMap = data.milestoneRoles[interaction.guildId] || {};
         const sThresholds = data.milestoneThresholds[interaction.guildId] || {};
 
-        const groupBind = serverBinds[0]; 
-        const match = gRes.data.data.find(g => g.group.id.toString() === groupBind?.groupId);
-        const userRank = match ? match.role.rank : 0;
+        const primaryGroupId = data.groups?.[interaction.guildId];
+        const primaryMatch = gRes.data.data.find(g => g.group.id.toString() === primaryGroupId);
+        const mainGroupRank = primaryMatch ? primaryMatch.role.rank : 0;
 
         // --- Standard 1-to-1 individual binds ---
         for (const b of serverBinds) {
             const role = interaction.guild.roles.cache.get(b.roleId);
             if (role) {
-                if (userRank === b.rankId && netInvites >= (b.minInvites || 0)) { 
+                const currentBindGroupMatch = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
+                const specificUserRank = currentBindGroupMatch ? currentBindGroupMatch.role.rank : 0;
+
+                if (specificUserRank === b.rankId && netInvites >= (b.minInvites || 0)) { 
                     if (!targetMember.roles.cache.has(role.id)) {
                         await targetMember.roles.add(role); 
                         added.push(role.name); 
@@ -346,6 +383,7 @@ async function runUpdateProcess(interaction, targetUser) {
                     await applyUserRankMutations(targetMember, robloxId, b, robloxName);
                 } else if (targetMember.roles.cache.has(role.id)) { 
                     await targetMember.roles.remove(role); 
+                    removed.push(role.name);
                 }
             }
         }
@@ -353,7 +391,7 @@ async function runUpdateProcess(interaction, targetUser) {
         // --- Multi-role threshold iteration ---
         for (const [categoryKey, roleIdsArray] of Object.entries(sRolesMap)) {
             const minRequiredRank = sThresholds[categoryKey] ?? 0;
-            const qualifies = userRank >= minRequiredRank;
+            const qualifies = mainGroupRank >= minRequiredRank;
 
             if (Array.isArray(roleIdsArray)) {
                 for (const rId of roleIdsArray) {
@@ -366,9 +404,24 @@ async function runUpdateProcess(interaction, targetUser) {
                         added.push(discordRole.name);
                     } else if (!qualifies && hasRole) {
                         await targetMember.roles.remove(discordRole).catch(() => {});
+                        removed.push(discordRole.name);
                     }
                 }
             }
+        }
+
+        if (added.length > 0 || removed.length > 0) {
+            const syncAuditEmbed = new EmbedBuilder()
+                .setTitle("🔄 Verification Sync Log")
+                .setColor(0xE67E22)
+                .addFields(
+                    { name: "Target Trooper:", value: `<@${targetUser.id}>`, inline: true },
+                    { name: "Roblox Profile Name:", value: `\`${robloxName}\``, inline: true },
+                    { name: "Roles Granted:", value: added.length > 0 ? added.map(r => `+ ${r}`).join('\n') : "*None*", inline: false },
+                    { name: "Roles Revoked:", value: removed.length > 0 ? removed.map(r => `- ${r}`).join('\n') : "*None*", inline: false }
+                )
+                .setTimestamp();
+            sendSystemLog(interaction.guildId, { embeds: [syncAuditEmbed] });
         }
 
         const embed = new EmbedBuilder()
@@ -376,8 +429,8 @@ async function runUpdateProcess(interaction, targetUser) {
             .setColor(0x2ECC71) 
             .addFields(
                 { name: "Trooper:", value: `<@${targetUser.id}>`, inline: true },
-                { name: "Roblox Rank ID:", value: `\`${userRank}\``, inline: true },
-                { name: "Updates Processed:", value: added.length > 0 ? added.join('\n') : "No changes applied.", inline: false }
+                { name: "Main Group Rank ID:", value: `\`${mainGroupRank}\``, inline: true },
+                { name: "Updates Processed:", value: added.length > 0 ? added.join('\n') : "No changes applied." }
             );
         return interaction.editReply({ embeds: [embed] });
     } catch (e) { 
@@ -399,6 +452,23 @@ client.on('interactionCreate', async interaction => {
 
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel, guild } = interaction;
+
+    if (commandName === 'setup-logs') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        }
+        await interaction.deferReply();
+        const targetChannel = options.getChannel('channel');
+
+        if (!targetChannel.isTextBased()) {
+            return interaction.editReply("❌ Please select a text-based channel.");
+        }
+
+        if (!data.logsChannel) data.logsChannel = {};
+        data.logsChannel[guildId] = targetChannel.id;
+        saveData();
+        return interaction.editReply(`✅ **Logging Channel Saved:** Log entries will now stream directly to <#${targetChannel.id}>.`);
+    }
 
     if (commandName === 'autorole') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
@@ -438,11 +508,10 @@ client.on('interactionCreate', async interaction => {
         const rolesListString = options.getString('roles-list');
         const minRank = options.getInteger('min-rank');
 
-        // Regex parses out clean SNOWFLAKE IDs from raw text or mentions
         const parsedIds = [...rolesListString.matchAll(/\d+/g)].map(match => match[0]);
 
         if (!parsedIds.length) {
-            return interaction.editReply("❌ No valid Discord roles could be found in your entry field text. Make sure to mention them or separate using commas.");
+            return interaction.editReply("❌ No valid Discord roles could be extracted from your text. Make sure to mention them or separate them using commas.");
         }
 
         if (!data.milestoneRoles) data.milestoneRoles = {};
@@ -611,7 +680,15 @@ client.on('interactionCreate', async interaction => {
         const wait = checkCooldown(interaction.user.id, commandName, 5);
         if (wait) return interaction.reply({ content: `⏳ Cooldown active: ${wait}s`, flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        return await runVerificationProcess(interaction, options.getString('username'));
+
+        const targetUser = options.getUser('target') || interaction.user;
+
+        // Security Lock: Block non-admins from changing other users
+        if (targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.editReply("❌ You do not have permission to verify other members.");
+        }
+
+        return await runVerificationProcess(interaction, options.getString('username'), targetUser);
     }
 
     if (commandName === 'setup-group') {
@@ -658,7 +735,14 @@ client.on('interactionCreate', async interaction => {
 
     if (commandName === 'update') {
         await interaction.deferReply();
-        return await runUpdateProcess(interaction, options.getUser('user') || interaction.user);
+        const targetUser = options.getUser('user') || interaction.user;
+
+        // Security Lock: Block non-admins from manually running updates on other users
+        if (targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.editReply("❌ You do not have permission to force rank updates on other members.");
+        }
+
+        return await runUpdateProcess(interaction, targetUser);
     }
 
     if (commandName === 'invites-leaderboard') {
