@@ -37,10 +37,11 @@ let data = {
     invites: {}, 
     logs: {},
     security: {},
-    autoroles: {},
+    autoroles: {}, // Now stores an array of role IDs per guild
     milestoneRoles: {}, 
     milestoneThresholds: {},
-    logsChannel: {} 
+    logsChannel: {},
+    ticketCounter: {}
 };
 
 // Temporary cache to hold active verification codes
@@ -71,6 +72,7 @@ function loadData() {
             if (!data.milestoneRoles) data.milestoneRoles = {};
             if (!data.milestoneThresholds) data.milestoneThresholds = {};
             if (!data.logsChannel) data.logsChannel = {};
+            if (!data.ticketCounter) data.ticketCounter = {};
         }
     } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
@@ -128,8 +130,8 @@ const commands = [
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
     new SlashCommandBuilder().setName('updateall').setDescription('Lead Command Only: Update every verified member in the server at once'),
     new SlashCommandBuilder().setName('verification-panel').setDescription('Admin Only: Post the interactive verification embed panel with buttons'),
-    new SlashCommandBuilder().setName('autorole').setDescription('Admin Only: Configure a role given to all members instantly upon joining')
-        .addRoleOption(o => o.setName('role').setDescription('The role to auto-assign on join').setRequired(false)),
+    new SlashCommandBuilder().setName('autorole').setDescription('Admin Only: Add/remove an entry role, or view active configurations')
+        .addRoleOption(o => o.setName('role').setDescription('The role to toggle on/off for welcome assignment').setRequired(false)),
     new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle shield settings')
         .addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
         .addUserOption(o => o.setName('protect-user').setDescription('Nuke messages that mention this specific user').setRequired(false))
@@ -160,7 +162,8 @@ const commands = [
     new SlashCommandBuilder().setName('unmute').setDescription('Admin Only: Lift an active timeout from a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)),
     new SlashCommandBuilder().setName('say').setDescription('Make the bot echo text messages').addStringOption(o => o.setName('text').setDescription('Text message to broadcast').setRequired(true)),
     new SlashCommandBuilder().setName('giveaway').setDescription('Manage community giveaways').addSubcommand(s => s.setName('create').setDescription('Initialize a server giveaway package')),
-    new SlashCommandBuilder().setName('tickets').setDescription('Open or configuration process helper ticket pipelines')
+    new SlashCommandBuilder().setName('tickets').setDescription('Manage the ticketing system pipeline')
+        .addSubcommand(s => s.setName('setup').setDescription('Admin Only: Send the interactive support panel to this channel'))
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
@@ -197,11 +200,14 @@ client.on('guildMemberAdd', async member => {
         } catch (e) { console.error(e); }
     }
 
-    const activeAutoRoleId = data.autoroles?.[member.guild.id];
-    if (activeAutoRoleId) {
-        const targetJoinRole = member.guild.roles.cache.get(activeAutoRoleId);
-        if (targetJoinRole) {
-            await member.roles.add(targetJoinRole).catch(err => console.log("Auto-assignment execution block:", err.message));
+    // MULTI-AUTOROLE ASSIGNMENT PIPELINE
+    const activeAutoRoleIds = data.autoroles?.[member.guild.id];
+    if (Array.isArray(activeAutoRoleIds) && activeAutoRoleIds.length > 0) {
+        for (const rId of activeAutoRoleIds) {
+            const targetJoinRole = member.guild.roles.cache.get(rId);
+            if (targetJoinRole) {
+                await member.roles.add(targetJoinRole).catch(err => console.log(`Auto-assignment block for role ${rId}:`, err.message));
+            }
         }
     }
 
@@ -479,22 +485,63 @@ client.on('interactionCreate', async interaction => {
         if (interaction.customId === 'panel_link_btn') {
             return interaction.reply({ content: "Please execute the `/verify` command to securely register your identity.", flags: [MessageFlags.Ephemeral] });
         }
+
+        if (interaction.customId === 'open_ticket_btn') {
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+            
+            if (!data.ticketCounter[interaction.guildId]) data.ticketCounter[interaction.guildId] = 0;
+            data.ticketCounter[interaction.guildId]++;
+            saveData();
+
+            const countStr = data.ticketCounter[interaction.guildId].toString().padStart(4, '0');
+            const channelName = `ticket-${countStr}`;
+
+            try {
+                const ticketChannel = await interaction.guild.channels.create({
+                    name: channelName,
+                    type: ChannelType.GuildText,
+                    permissionOverwrites: [
+                        { id: interaction.guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+                        { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] }
+                    ]
+                });
+
+                const welcomeTicketEmbed = new EmbedBuilder()
+                    .setTitle(`🎫 Support Ticket #${countStr}`)
+                    .setDescription(`Greetings <@${interaction.user.id}>,\n\nSupport personnel have been paged. Please describe your inquiry or problem explicitly while waiting.\n\nTo lock or completely close out this transmission, select the action button below.`)
+                    .setColor(0x3498DB)
+                    .setTimestamp();
+
+                const closeActionRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId('close_ticket_btn').setLabel('Close Ticket').setStyle(ButtonStyle.Danger)
+                );
+
+                await ticketChannel.send({ embeds: [welcomeTicketEmbed], components: [closeActionRow] });
+                sendSystemLog(interaction.guildId, `🎟️ **Ticket Opened:** <@${interaction.user.id}> generated private support desk channel <#${ticketChannel.id}>.`);
+                
+                return interaction.editReply(`✅ Ticket channel established perfectly: <#${ticketChannel.id}>`);
+            } catch (err) {
+                console.error(err);
+                return interaction.editReply("❌ Failed to establish the private support pipeline. Check internal bot channel permissions.");
+            }
+        }
+
+        if (interaction.customId === 'close_ticket_btn') {
+            await interaction.reply({ content: "🔒 Archiving and closing execution parameters acknowledged. Removing track channel in 5 seconds..." });
+            sendSystemLog(interaction.guildId, `🗑️ **Ticket Closed:** Support workspace channel \`${interaction.channel.name}\` processed for removal.`);
+            setTimeout(() => { interaction.channel.delete().catch(() => {}); }, 5000);
+            return;
+        }
     }
 
     if (!interaction.isChatInputCommand()) return;
-    const { commandName, options, guildId, member, channel, guild } = interaction;
+    const { commandName, options, guildId, member, channel } = interaction;
 
     if (commandName === 'setup-logs') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        }
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
         const targetChannel = options.getChannel('channel');
-
-        if (!targetChannel.isTextBased()) {
-            return interaction.editReply("❌ Please select a text-based channel.");
-        }
-
+        if (!targetChannel.isTextBased()) return interaction.editReply("❌ Please select a text-based channel.");
         if (!data.logsChannel) data.logsChannel = {};
         data.logsChannel[guildId] = targetChannel.id;
         saveData();
@@ -502,48 +549,49 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'autorole') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        }
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
+        
         const selectedRole = options.getRole('role');
+        if (!data.autoroles) data.autoroles = {};
+        if (!Array.isArray(data.autoroles[guildId])) data.autoroles[guildId] = [];
 
+        // If no role option is passed, view active configurations
         if (!selectedRole) {
-            const cachedId = data.autoroles?.[guildId];
-            if (!cachedId) return interaction.editReply("ℹ️ No autorole configuration active on this server yet.");
-            return interaction.editReply(`ℹ️ Users currently receive role: <@&${cachedId}> upon entry point connection.`);
+            const activeIds = data.autoroles[guildId];
+            if (!activeIds.length) return interaction.editReply("ℹ️ No autorole configurations active on this server yet.");
+            const list = activeIds.map(id => `<@&${id}>`).join(', ');
+            return interaction.editReply(`ℹ️ Users currently receive the following roles upon entry: ${list}`);
         }
 
-        if (!data.autoroles) data.autoroles = {};
-        data.autoroles[guildId] = selectedRole.id;
-        saveData();
-        return interaction.editReply(`✅ **Autorole Saved:** All users joining the server will now instantly be granted <@&${selectedRole.id}>.`);
+        // Toggle logic: remove it if it exists, add it if it doesn't
+        if (data.autoroles[guildId].includes(selectedRole.id)) {
+            data.autoroles[guildId] = data.autoroles[guildId].filter(id => id !== selectedRole.id);
+            saveData();
+            return interaction.editReply(`✅ **Autorole Removed:** <@&${selectedRole.id}> has been removed from the welcome pool list.`);
+        } else {
+            data.autoroles[guildId].push(selectedRole.id);
+            saveData();
+            return interaction.editReply(`✅ **Autorole Added:** <@&${selectedRole.id}> will now be automatically assigned to incoming members along with any other listed autoroles.`);
+        }
     }
 
     if (commandName === 'sync-milestones') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        }
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        const targetTrooper = options.getUser('target');
-        return await runUpdateProcess(interaction, targetTrooper);
+        return await runUpdateProcess(interaction, options.getUser('target'));
     }
 
     if (commandName === 'setup-milestones') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        }
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
 
         const categoryName = options.getString('category-name').toLowerCase().replace(/\s+/g, '_');
         const rolesListString = options.getString('roles-list');
         const minRank = options.getInteger('min-rank');
-
         const parsedIds = [...rolesListString.matchAll(/\d+/g)].map(match => match[0]);
 
-        if (!parsedIds.length) {
-            return interaction.editReply("❌ No valid Discord roles could be extracted from your text. Make sure to mention them or separate them using commas.");
-        }
+        if (!parsedIds.length) return interaction.editReply("❌ No valid Discord roles could be extracted from your text.");
 
         if (!data.milestoneRoles) data.milestoneRoles = {};
         if (!data.milestoneThresholds) data.milestoneThresholds = {};
@@ -558,9 +606,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'bind') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        }
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
         
         const rankId = options.getInteger('rankid');
@@ -569,9 +615,7 @@ client.on('interactionCreate', async interaction => {
         const minInvites = options.getInteger('min-invites') || 0;
         const groupId = data.groups?.[guildId];
 
-        if (!groupId) {
-            return interaction.editReply("❌ Please associate a Roblox Group ID using `/setup-group` first.");
-        }
+        if (!groupId) return interaction.editReply("❌ Please associate a Roblox Group ID using `/setup-group` first.");
 
         if (!data.binds[guildId]) data.binds[guildId] = [];
         data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === groupId && b.rankId === rankId));
@@ -582,9 +626,7 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'antimention') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        }
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
 
         const enabledSetting = options.getBoolean('enabled');
@@ -608,14 +650,10 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'antimention-remove') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        }
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        
         if (data.antimention) data.antimention[guildId] = false;
         if (data.protectedTargets) data.protectedTargets[guildId] = { userId: null, roleId: null };
-        
         saveData();
         return interaction.editReply("✅ Anti-mention constraints wiped clean.");
     }
@@ -656,9 +694,7 @@ client.on('interactionCreate', async interaction => {
         try {
             await interaction.guild.members.unban(userIdInput);
             return interaction.editReply(`✅ Successfully unbanned user ID: \`${userIdInput}\``);
-        } catch (err) {
-            return interaction.editReply(`❌ Failed to unban user: ${err.message}`);
-        }
+        } catch (err) { return interaction.editReply(`❌ Failed to unban user: ${err.message}`); }
     }
     
     if (commandName === 'kick') {
@@ -683,9 +719,7 @@ client.on('interactionCreate', async interaction => {
         try {
             await targetMember.timeout(null);
             return interaction.editReply(`🔊 Active timeout has been lifted from <@${targetMember.id}>.`);
-        } catch (err) {
-            return interaction.editReply(`❌ Failed to remove timeout: ${err.message}`);
-        }
+        } catch (err) { return interaction.editReply(`❌ Failed to remove timeout: ${err.message}`); }
     }
 
     if (commandName === 'say') {
@@ -709,19 +743,31 @@ client.on('interactionCreate', async interaction => {
 
     if (commandName === 'verify') {
         const targetUser = options.getUser('target');
-
-        // STRICT ACCESS CONTROL CHECK: Only admins can specify a target other than themselves
         if (targetUser && targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.reply({ content: "❌ Access Denied: You are not an Administrator. You are only allowed to verify your own account.", flags: [MessageFlags.Ephemeral] });
+            return interaction.reply({ content: "❌ Access Denied: You are only allowed to verify your own account.", flags: [MessageFlags.Ephemeral] });
         }
-
         const wait = checkCooldown(interaction.user.id, commandName, 5);
         if (wait) return interaction.reply({ content: `⏳ Cooldown active: ${wait}s`, flags: [MessageFlags.Ephemeral] });
-        
         await interaction.deferReply();
         const activeTarget = targetUser || interaction.user;
-
         return await runVerificationProcess(interaction, options.getString('username'), activeTarget);
+    }
+
+    if (commandName === 'tickets') {
+        const subcommand = options.getSubcommand();
+        if (subcommand === 'setup') {
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+            await interaction.deferReply();
+            const ticketEmbed = new EmbedBuilder()
+                .setTitle("🎫 Central Support Hub")
+                .setDescription("Need assistance or have a core inquiry? Open an encrypted support workspace route below.")
+                .setColor(0x2ECC71);
+            const btnRow = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setCustomId('open_ticket_btn').setLabel('Create Support Ticket').setStyle(ButtonStyle.Primary).setEmoji('📩')
+            );
+            await channel.send({ embeds: [ticketEmbed], components: [btnRow] });
+            return interaction.editReply("✅ Interactive Support Panel deployed successfully.");
+        }
     }
 
     if (commandName === 'setup-group') {
@@ -769,11 +815,9 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'update') {
         await interaction.deferReply();
         const targetUser = options.getUser('user') || interaction.user;
-
         if (targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.editReply("❌ You do not have permission to force rank updates on other members.");
         }
-
         return await runUpdateProcess(interaction, targetUser);
     }
 
@@ -794,24 +838,12 @@ client.on('interactionCreate', async interaction => {
 
         if (!sorted.length) return interaction.editReply("No profile invite fields parsed yet.");
 
-        let descriptionLines = sorted.map((u, i) => {
-            return `${i + 1}. <@${u.id}> • **${u.total}** invites. (${u.regular} regular, ${u.left} left, ${u.fake} fake, ${u.bonus} bonus)`;
-        });
-
-        const leaderboardEmbed = new EmbedBuilder()
-            .setTitle("Invites Leaderboard")
-            .setColor(0x00FFFF)
-            .setDescription(descriptionLines.join('\n'));
-
-        return interaction.editReply({ embeds: [leaderboardEmbed] });
+        let descriptionLines = sorted.map((u, i) => `${i + 1}. <@${u.id}> • **${u.total}** invites. (${u.regular} regular, ${u.left} left, ${u.fake} fake, ${u.bonus} bonus)`);
+        return interaction.editReply({ embeds: [new EmbedBuilder().setTitle("Invites Leaderboard").setColor(0x00FFFF).setDescription(descriptionLines.join('\n'))] });
     }
 
     if (commandName === 'giveaway') {
         return interaction.reply({ content: "🎉 Giveaway system processing backend configurations...", flags: [MessageFlags.Ephemeral] });
-    }
-
-    if (commandName === 'tickets') {
-        return interaction.reply({ content: "🎫 Ticket integration pipeline loading...", flags: [MessageFlags.Ephemeral] });
     }
 });
 
