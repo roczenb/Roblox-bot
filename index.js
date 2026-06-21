@@ -277,7 +277,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
 
     if (oldRoles.size !== newRoles.size) {
         const addedRoles = newRoles.filter(role => !oldRoles.has(role.id));
-        const removedRoles = oldRoles.filter(role => !newRoles.has(role.id));
+        const removedRoles = oldRoles.filter(role => !oldRoles.has(role.id));
 
         const updateEmbed = new EmbedBuilder()
             .setTitle("🛡️ Member Role Modification")
@@ -405,7 +405,7 @@ client.on('messageCreate', async message => {
             if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) return;
             const count = parseInt(structuralArgs[0]);
             if (!count || isNaN(count) || count < 1 || count > 100) {
-                return message.reply("⚠️ Specify an explicit bulk deletion amount between 1 and 100 messages.");
+                return message.reply("**Command: ?purge**\n\n**Description:** Delete patches of text logs in bulk.\n**Cooldown:** 3 seconds\n**Usage:**\n?purge [count]\n\n**Example:**\n?purge 50");
             }
             await message.delete().catch(() => {});
             const cleared = await message.channel.bulkDelete(count, true).catch(() => []);
@@ -426,9 +426,10 @@ client.on('messageCreate', async message => {
         if (invokerTarget === 'ban') {
             if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
-            if (!targetUser) return message.reply("⚠️ Unable to verify targeted entity structure variable. Supply a valid mention or ID.");
+            if (!targetUser) {
+                return message.reply("**Command: ?ban**\n\n**Description:** Permanently ban a member from the network matrix.\n**Cooldown:** 3 seconds\n**Usage:**\n?ban [user] [reason]\n\n**Example:**\n?ban @NoobLance Terminated.");
+            }
             const reason = structuralArgs.slice(1).join(" ") || "No reason specified.";
-            
             await targetUser.ban({ reason: reason });
             return message.reply(`🔨 **${targetUser.user.tag}** has been banned from the server grid matrix.`);
         }
@@ -437,9 +438,10 @@ client.on('messageCreate', async message => {
         if (invokerTarget === 'kick') {
             if (!message.member.permissions.has(PermissionFlagsBits.KickMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
-            if (!targetUser) return message.reply("⚠️ Unable to verify targeted entity structure variable. Supply a valid mention or ID.");
+            if (!targetUser) {
+                return message.reply("**Command: ?kick**\n\n**Description:** Kick a member.\n**Cooldown:** 3 seconds\n**Usage:**\n?kick [user] [reason]\n\n**Example:**\n?kick @NoobLance Get out!");
+            }
             const reason = structuralArgs.slice(1).join(" ") || "No reason specified.";
-
             await targetUser.kick(reason);
             return message.reply(`👢 **${targetUser.user.tag}** was forcibly expelled.`);
         }
@@ -451,7 +453,7 @@ client.on('messageCreate', async message => {
             const dynamicMinutes = parseInt(structuralArgs[1]);
 
             if (!targetUser || isNaN(dynamicMinutes) || dynamicMinutes <= 0) {
-                return message.reply("⚠️ Usage: `?timeout [@user/ID] [minutes]`");
+                return message.reply("**Command: ?timeout**\n\n**Description:** Put a member in temporary isolation.\n**Cooldown:** 3 seconds\n**Usage:**\n?timeout [user] [minutes]\n\n**Example:**\n?timeout @NoobLance 10");
             }
 
             await targetUser.timeout(dynamicMinutes * 60 * 1000);
@@ -462,8 +464,9 @@ client.on('messageCreate', async message => {
         if (invokerTarget === 'unmute') {
             if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
-            if (!targetUser) return message.reply("⚠️ Supply an active user trace parameters.");
-
+            if (!targetUser) {
+                return message.reply("**Command: ?unmute**\n\n**Description:** Restore text capability arrays to muted targets.\n**Cooldown:** 3 seconds\n**Usage:**\n?unmute [user]\n\n**Example:**\n?unmute @NoobLance");
+            }
             await targetUser.timeout(null);
             return message.reply(`🔊 Communication channel array elements restored for **${targetUser.user.tag}**.`);
         }
@@ -582,6 +585,11 @@ async function runUpdateProcess(interaction, targetUser) {
         const uLookup = await axios.get(`https://users.roproxy.com/v1/users/${robloxId}`);
         const robloxName = uLookup.data.name;
 
+        let primaryGroupRankId = 0;
+        if (userGroupsCache.length > 0) {
+            primaryGroupRankId = userGroupsCache[0].role.rank;
+        }
+
         for (const b of serverBinds) {
             const role = interaction.guild.roles.cache.get(b.roleId);
             if (role) {
@@ -629,12 +637,14 @@ async function runUpdateProcess(interaction, targetUser) {
             }
         }
 
+        // EXACT REPLICA OF THE UPLOADED SYNC EMBED SCREENSHOT 
         const embed = new EmbedBuilder()
-            .setTitle("Profile Synced Across Networks")
+            .setTitle("Clone Trooper Profile Synced")
             .setColor(0x2ECC71) 
             .addFields(
-                { name: "Account:", value: `<@${targetUser.id}>`, inline: true },
-                { name: "Modifications processed:", value: added.length > 0 ? `+ ${added.join('\n+ ')}` : "No rank adjustments applied." }
+                { name: "Trooper:", value: `<@${targetUser.id}>`, inline: true },
+                { name: "Main Group Rank ID:", value: `\`${primaryGroupRankId}\``, inline: true },
+                { name: "Updates Processed:", value: added.length > 0 ? `+ Added: ${added.join(', ')}\n- Removed: ${removed.join(', ')}` : "No changes applied.", inline: false }
             );
         return interaction.editReply({ embeds: [embed] });
     } catch (e) { console.error(e); return interaction.editReply("❌ Error processing updates across groups."); }
