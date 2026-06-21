@@ -32,7 +32,7 @@ const client = new Client({
 const DB_FILE = '/app/data/bot_data.json';
 let data = { 
     users: {}, 
-    groups: {}, 
+    groups: {},             // Deprecated in favor of storing group contexts per bind/milestone
     binds: {}, 
     antimention: {}, 
     protectedTargets: {},
@@ -40,14 +40,9 @@ let data = {
     logs: {},
     security: {},
     autoroles: {}, 
-    milestoneRoles: {}, 
-    milestoneThresholds: {},
-    // SEGREGATED SYSTEM LOG STRUCTURE PIPELINES
-    logsChannels: {
-        system: null,      // Main server updates, bans, kicks, timeouts, purges
-        moderator: null,   // Message deletes and message edits
-        movement: null     // Member join/leave, role adds/removes
-    },
+    milestoneRoles: {},     // Updated to map via group ID strings
+    milestoneThresholds: {},// Updated to map via group ID strings
+    logsChannels: { system: null, moderator: null, movement: null },
     ticketCounter: {}
 };
 
@@ -88,7 +83,6 @@ function saveData() {
 
 loadData();
 
-// ROUTER PIPELINE FOR SEGREGATED TRACKING SYSTEM LOGS
 function dispatchLog(guildId, targetPipeline, logPayload) {
     const channelId = data.logsChannels?.[targetPipeline]?.[guildId] || data.logsChannels?.[targetPipeline];
     if (!channelId) return;
@@ -116,21 +110,26 @@ const commands = [
     new SlashCommandBuilder().setName('verify').setDescription('Link a Roblox account globally')
         .addStringOption(o => o.setName('username').setDescription('Username').setRequired(true))
         .addUserOption(o => o.setName('target').setDescription('Admin Only: Target user to verify for them').setRequired(false)),
-    new SlashCommandBuilder().setName('setup-group').setDescription('Link a Roblox Group ID to this server').addStringOption(o => o.setName('groupid').setDescription('Group ID').setRequired(true)),
-    new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto create and bind roles sorted perfectly by chain of command hierarchy'),
+    
+    new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto-bind an entire group structure by chain of command')
+        .addStringOption(o => o.setName('groupid').setDescription('Roblox Group ID to completely map out').setRequired(true)),
+    
     new SlashCommandBuilder().setName('bind').setDescription('Bind a specific rank to a role')
-        .addIntegerOption(o => o.setName('rankid').setDescription('Rank').setRequired(true))
-        .addRoleOption(o => o.setName('role').setDescription('Role').setRequired(true))
+        .addStringOption(o => o.setName('groupid').setDescription('Roblox Group ID').setRequired(true))
+        .addIntegerOption(o => o.setName('rankid').setDescription('Rank ID (0-255)').setRequired(true))
+        .addRoleOption(o => o.setName('role').setDescription('Discord Role Target').setRequired(true))
         .addStringOption(o => o.setName('nickname-format').setDescription('Format, e.g: E1 | {roblox_username}').setRequired(false))
         .addIntegerOption(o => o.setName('min-invites').setDescription('Minimum required invites').setRequired(false)),
-    new SlashCommandBuilder().setName('update').setDescription('Sync ranks in this server').addUserOption(o => o.setName('user').setDescription('Admin Only: Target user to update').setRequired(false)),
-    new SlashCommandBuilder().setName('sync-milestones').setDescription('Admin Only: Force re-verify and evaluate batch division rules for a member').addUserOption(o => o.setName('target').setDescription('The trooper to sync tier roles for').setRequired(true)),
-    new SlashCommandBuilder().setName('setup-milestones').setDescription('Admin Only: Configure multiple roles awarded to anyone AT or ABOVE a certain Roblox rank')
-        .addStringOption(o => o.setName('category-name').setDescription('Label for this threshold pool (e.g. Officer Pack)').setRequired(true))
-        .addStringOption(o => o.setName('roles-list').setDescription('Comma separated list of multiple roles (e.g. @Role1, @Role2)').setRequired(true))
-        .addIntegerOption(o => o.setName('min-rank').setDescription('The minimum Roblox rank number required (e.g. 30)').setRequired(true)),
     
-    // CONVERGED MULTI-CHANNEL DETAILED SYSTEM CONFIGURATION LOG SELECTION
+    new SlashCommandBuilder().setName('update').setDescription('Sync ranks in this server').addUserOption(o => o.setName('user').setDescription('Admin Only: Target user to update').setRequired(false)),
+    new SlashCommandBuilder().setName('sync-milestones').setDescription('Admin Only: Force tier updates').addUserOption(o => o.setName('target').setDescription('The trooper to sync tier roles for').setRequired(true)),
+    
+    new SlashCommandBuilder().setName('setup-milestones').setDescription('Admin Only: Configure roles awarded at/above a Roblox rank')
+        .addStringOption(o => o.setName('groupid').setDescription('Roblox Group ID to evaluate against').setRequired(true))
+        .addStringOption(o => o.setName('category-name').setDescription('Label for this pool (e.g. Officer Pack)').setRequired(true))
+        .addStringOption(o => o.setName('roles-list').setDescription('Comma separated list of multiple roles (e.g. @Role1, @Role2)').setRequired(true))
+        .addIntegerOption(o => o.setName('min-rank').setDescription('The minimum Roblox rank number required').setRequired(true)),
+    
     new SlashCommandBuilder().setName('setup-logs').setDescription('Admin Only: Route logs to independent tracking stations')
         .addStringOption(o => o.setName('category').setDescription('Select targeting track pipeline category').setRequired(true)
             .addChoices(
@@ -172,10 +171,8 @@ const commands = [
     new SlashCommandBuilder().setName('giveaway').setDescription('Manage community giveaways').addSubcommand(s => s.setName('create').setDescription('Initialize a server giveaway package')),
     new SlashCommandBuilder().setName('tickets').setDescription('Manage the ticketing system pipeline')
         .addSubcommand(s => s.setName('setup').setDescription('Admin Only: Send the interactive support panel to this channel')),
-    
-    // EXPLICIT BOT PURGE COMMAND
-    new SlashCommandBuilder().setName('purge').setDescription('Admin Only: Delete a bulk amount of text packets instantly from this stream channel')
-        .addIntegerOption(o => o.setName('amount').setDescription('Number of system elements to dump (Max 100)').setRequired(true))
+    new SlashCommandBuilder().setName('purge').setDescription('Admin Only: Delete bulk message packets')
+        .addIntegerOption(o => o.setName('amount').setDescription('Number of messages to clear').setRequired(true))
 ].map(c => c.toJSON());
 
 client.once('ready', async () => {
@@ -184,7 +181,7 @@ client.once('ready', async () => {
         try {
             const firstInvites = await guild.invites.fetch();
             guildInvitesCache.set(guild.id, new Map(firstInvites.map(invite => [invite.code, invite.uses])));
-        } catch (err) { console.log(`Invite monitoring limitations check.`); }
+        } catch (err) { console.log(`Invite monitoring caching skipped.`); }
     }
     try {
         const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
@@ -193,7 +190,7 @@ client.once('ready', async () => {
         for (const [guildId] of guilds) {
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
         }
-        console.log('Segregated logging slash elements deployed!');
+        console.log('Multi-group binding slash configurations online!');
     } catch (e) { console.error(e); }
 });
 
@@ -202,13 +199,12 @@ client.on('inviteCreate', invite => {
     if (cache) cache.set(invite.code, invite.uses);
 });
 
-// PIPELINE 3: MOVEMENT TRACK LOGS (GUILD MEMBER ADD)
 client.on('guildMemberAdd', async member => {
     if (data.security[member.guild.id]?.beastMode) {
         try {
             await member.send("⚠️ This server is under high security lockdown.");
-            await member.kick("Beast Mode Activity Mitigation Rules");
-            dispatchLog(member.guild.id, 'system', `🚨 **Beast Mode Security Tripped:** Kicked incoming user <@${member.id}> to maintain perimeter integrity.`);
+            await member.kick("Beast Mode Activity Mitigation");
+            dispatchLog(member.guild.id, 'system', `🚨 **Beast Mode Security Tripped:** Kicked incoming user <@${member.id}>`);
             return;
         } catch (e) { console.error(e); }
     }
@@ -248,15 +244,14 @@ client.on('guildMemberAdd', async member => {
     const joinEmbed = new EmbedBuilder()
         .setTitle("📥 Member Joined Connection")
         .setColor(0x2ECC71)
-        .setDescription(`<@${member.id}> linked up to the tracking grid.\n**Invited By:** <@${usedBy}>\n**Invitation Code:** \`${inviteCodeUsed || 'N/A'}\``)
+        .setDescription(`<@${member.id}> joined.\n**Invited By:** <@${usedBy}>\n**Code:** \`${inviteCodeUsed || 'N/A'}\``)
         .setTimestamp();
     dispatchLog(member.guild.id, 'movement', { embeds: [joinEmbed] });
 });
 
-// PIPELINE 3: MOVEMENT TRACK LOGS (GUILD MEMBER REMOVE)
 client.on('guildMemberRemove', async member => {
     const log = data.logs[member.id];
-    let inviterString = "Unknown Grid Agent";
+    let inviterString = "Unknown Recruiter";
     if (log && data.invites[member.guild.id]?.[log.inviter]) {
         data.invites[member.guild.id][log.inviter].left += 1;
         saveData();
@@ -266,12 +261,11 @@ client.on('guildMemberRemove', async member => {
     const leaveEmbed = new EmbedBuilder()
         .setTitle("📤 Member Severed Connection")
         .setColor(0xE74C3C)
-        .setDescription(`<@${member.id}> left or disconnected from the core.\n**Original Anchor:** ${inviterString}`)
+        .setDescription(`<@${member.id}> left.\n**Original Recruiter:** ${inviterString}`)
         .setTimestamp();
     dispatchLog(member.guild.id, 'movement', { embeds: [leaveEmbed] });
 });
 
-// PIPELINE 3: MOVEMENT TRACK LOGS (GUILD MEMBER UPDATE - ROLES POOL CHANGE)
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
     const oldRoles = oldMember.roles.cache;
     const newRoles = newMember.roles.cache;
@@ -281,75 +275,60 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
         const removedRoles = oldRoles.filter(role => !newRoles.has(role.id));
 
         const updateEmbed = new EmbedBuilder()
-            .setTitle("🛡️ Member Role Status Modification")
+            .setTitle("🛡️ Member Role Modification")
             .setColor(0x9B59B6)
             .setAuthor({ name: newMember.user.tag, iconURL: newMember.user.displayAvatarURL() })
             .setDescription(`**Target Account:** <@${newMember.id}>`)
             .setTimestamp();
 
-        if (addedRoles.size > 0) {
-            updateEmbed.addFields({ name: "➕ Granted Identity Role:", value: addedRoles.map(r => `<@&${r.id}>`).join(', ') });
-        }
-        if (removedRoles.size > 0) {
-            updateEmbed.addFields({ name: "➖ Revoked Identity Role:", value: removedRoles.map(r => `<@&${r.id}>`).join(', ') });
-        }
+        if (addedRoles.size > 0) updateEmbed.addFields({ name: "➕ Granted Role:", value: addedRoles.map(r => `<@&${r.id}>`).join(', ') });
+        if (removedRoles.size > 0) updateEmbed.addFields({ name: "➖ Revoked Role:", value: removedRoles.map(r => `<@&${r.id}>`).join(', ') });
 
         dispatchLog(newMember.guild.id, 'movement', { embeds: [updateEmbed] });
     }
 });
 
-// PIPELINE 2: MODERATOR-ONLY CHANNEL ACTIONS (MESSAGE UPDATE)
 client.on('messageUpdate', async (oldMessage, newMessage) => {
     if (oldMessage.author?.bot || oldMessage.content === newMessage.content) return;
-
     const editEmbed = new EmbedBuilder()
-        .setTitle("📝 Text Packet Edited")
+        .setTitle("📝 Message Edited")
         .setColor(0xF1C40F)
-        .setAuthor({ name: oldMessage.author?.tag || 'Unknown Account', iconURL: oldMessage.author?.displayAvatarURL() })
-        .setDescription(`**Author:** <@${oldMessage.author?.id}>\n**Location:** <#${oldMessage.channel.id}>`)
+        .setDescription(`**Author:** <@${oldMessage.author?.id}> in <#${oldMessage.channel.id}>`)
         .addFields(
-            { name: "Original Payload Content", value: oldMessage.content ? oldMessage.content.slice(0, 1024) : "*Empty/Embed*" },
-            { name: "Revised Transmission Stream", value: newMessage.content ? newMessage.content.slice(0, 1024) : "*Empty/Embed*" }
-        )
-        .setTimestamp();
+            { name: "Before", value: oldMessage.content ? oldMessage.content.slice(0, 1024) : "*Empty/Embed*" },
+            { name: "After", value: newMessage.content ? newMessage.content.slice(0, 1024) : "*Empty/Embed*" }
+        ).setTimestamp();
     dispatchLog(oldMessage.guildId, 'moderator', { embeds: [editEmbed] });
 });
 
-// PIPELINE 2: MODERATOR-ONLY CHANNEL ACTIONS (MESSAGE DELETE)
 client.on('messageDelete', async message => {
     if (message.author?.bot) return;
-
     const deleteEmbed = new EmbedBuilder()
-        .setTitle("🗑️ Text Transmission Purged / Deleted")
+        .setTitle("🗑️ Message Deleted")
         .setColor(0xE67E22)
-        .setAuthor({ name: message.author?.tag || 'Unknown Account', iconURL: message.author?.displayAvatarURL() })
-        .setDescription(`**Author:** <@${message.author?.id}>\n**Location Zone:** <#${message.channel.id}>`)
-        .addFields({ name: "Erased Content Data Block", value: message.content ? message.content.slice(0, 1024) : "*Empty context or Media file*" })
+        .setDescription(`**Author:** <@${message.author?.id}> in <#${message.channel.id}>`)
+        .addFields({ name: "Content Block", value: message.content ? message.content.slice(0, 1024) : "*Empty context or Media file*" })
         .setTimestamp();
     dispatchLog(message.guildId, 'moderator', { embeds: [deleteEmbed] });
 });
 
-// PIPELINE 1: CORE DISCORD SERVER UPDATES (CHANNEL CREATION INTERCEPT)
 client.on('channelCreate', async channel => {
     if (!channel.guild) return;
     const createEmbed = new EmbedBuilder()
-        .setTitle("✨ Matrix Channel Generated")
+        .setTitle("✨ Channel Created")
         .setColor(0x3498DB)
-        .setDescription(`**Name:** \`${channel.name}\`\n**Identity Route:** <#${channel.id}>\n**Type Config:** Channel Type Category ID [${channel.type}]`)
+        .setDescription(`**Name:** \`${channel.name}\`\n**Identity Route:** <#${channel.id}>`)
         .setTimestamp();
     dispatchLog(channel.guild.id, 'system', { embeds: [createEmbed] });
 });
 
-// PIPELINE 1: CORE DISCORD SERVER UPDATES (CHANNEL UPDATE / PERM OVERWRITES)
 client.on('channelUpdate', async (oldChannel, newChannel) => {
     if (!oldChannel.guild) return;
-    
-    // Look to see if permission strings were altered
     if (JSON.stringify(oldChannel.permissionOverwrites.cache) !== JSON.stringify(newChannel.permissionOverwrites.cache)) {
         const permEmbed = new EmbedBuilder()
-            .setTitle("🔒 Channel Perimeter Security Policy Altered")
+            .setTitle("🔒 Channel Permissions Altered")
             .setColor(0x34495E)
-            .setDescription(`Core permission map adjustments processed inside tracking grid:\n**Target Route:** <#${newChannel.id}> (\`${newChannel.name}\`)`)
+            .setDescription(`Overwrites adjusted within tracking grid: <#${newChannel.id}>`)
             .setTimestamp();
         dispatchLog(newChannel.guild.id, 'system', { embeds: [permEmbed] });
     }
@@ -370,21 +349,19 @@ function incrementSecurityTrigger(guildId) {
     if (dynamicFilter.length >= criticalThreshold && !data.security[guildId].beastMode) {
         data.security[guildId].beastMode = true;
         saveData();
-        const msg = `🚨 **SECURITY ALERT:** Rapid structural deletions detected (${dynamicFilter.length}/${criticalThreshold})! **BEAST MODE ENABLED.**`;
-        dispatchLog(guildId, 'system', msg);
+        dispatchLog(guildId, 'system', `🚨 **SECURITY ALERT:** Rapid modifications detected! **BEAST MODE ENABLED.**`);
     }
 }
 
 client.on('channelDelete', channel => { 
     if (channel.guild) {
-        const delEmbed = new EmbedBuilder().setTitle("🚨 Channel Deleted Structural Shift").setColor(0xD35400).setDescription(`Channel Named \`${channel.name}\` was permanently expunged.`).setTimestamp();
+        const delEmbed = new EmbedBuilder().setTitle("🚨 Channel Deleted").setColor(0xD35400).setDescription(`\`${channel.name}\` was deleted.`).setTimestamp();
         dispatchLog(channel.guild.id, 'system', { embeds: [delEmbed] });
         incrementSecurityTrigger(channel.guild.id); 
     }
 });
 client.on('roleDelete', role => { if (role.guild) incrementSecurityTrigger(role.guild.id); });
 
-// GLOBAL MESSAGES ESCORT SHIELD INTERCEPTOR
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
@@ -403,19 +380,19 @@ client.on('messageCreate', async message => {
     if (targetConfig && !isDiscordReply) {
         if (targetConfig.userId && message.mentions.users.has(targetConfig.userId)) {
             triggeredProtection = true;
-            protectionReason = `pings to <@${targetConfig.userId}> are strictly forbidden unless replying`;
+            protectionReason = `pings to <@${targetConfig.userId}> are restricted`;
         }
         if (targetConfig.roleId && message.mentions.roles.has(targetConfig.roleId)) {
             triggeredProtection = true;
-            protectionReason = `pings to <@&${targetConfig.roleId}> are strictly forbidden`;
+            protectionReason = `pings to <@&${targetConfig.roleId}> are restricted`;
         }
     }
 
     if ((totalMentions > 4 && !isDiscordReply) || triggeredProtection) {
-        if (!protectionReason) protectionReason = "mass mentions are restricted while the anti-mention shield is active";
+        if (!protectionReason) protectionReason = "mass mentions are forbidden while anti-mention shield is active";
         try {
             await message.delete();
-            dispatchLog(message.guild.id, 'moderator', `🛡️ **Anti-Mention Shield Cleaned Layer:** Blocked a transmission string from <@${message.author.id}> inside <#${message.channel.id}> due to restriction violation.`);
+            dispatchLog(message.guild.id, 'moderator', `🛡️ **Anti-Mention Shield:** Blocked message from <@${message.author.id}> in <#${message.channel.id}>.`);
             const warning = await message.channel.send(`⚠️ <@${message.author.id}>, ${protectionReason}.`);
             setTimeout(() => warning.delete().catch(() => {}), 5000);
         } catch (err) { console.log(err.message); }
@@ -446,7 +423,7 @@ async function runVerificationProcess(interaction, usernameInput, targetUser) {
 
             const challengeEmbed = new EmbedBuilder()
                 .setTitle("🛡️ Confirm Profile Ownership")
-                .setDescription(`To verify as **${usernameInput}**, please append the security token inside your Roblox account Bio description.\n\nOnce updated, rerun the command \`/verify username:${usernameInput}\` to link successfully.`)
+                .setDescription(`To verify as **${usernameInput}**, append the security token inside your Roblox account Bio description.\n\nOnce updated, rerun \`/verify username:${usernameInput}\` to match successfully.`)
                 .addFields({ name: "Required Verification Key:", value: `\`${generatedSecretCode}\`` })
                 .setColor(0xF1C40F);
             
@@ -470,9 +447,10 @@ async function runVerificationProcess(interaction, usernameInput, targetUser) {
     } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
 }
 
+// MULTI-GROUP RUN UPDATE EVALUATION PIPELINE
 async function runUpdateProcess(interaction, targetUser) {
     const robloxId = data.users[targetUser.id];
-    if (!robloxId) return interaction.editReply("❌ Connect identity profile link using `/verify` first.");
+    if (!robloxId) return interaction.editReply("❌ Connect identity profile details using `/verify` first.");
     
     const serverBinds = data.binds ? data.binds[interaction.guildId] : [];
     const userInvData = data.invites[interaction.guildId]?.[targetUser.id] || { regular: 0, left: 0 };
@@ -481,35 +459,54 @@ async function runUpdateProcess(interaction, targetUser) {
     try {
         let added = [], removed = [];
         const targetMember = await interaction.guild.members.fetch(targetUser.id);
+        
+        // Fetch all active group alignments the user belongs to on Roblox
         const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
+        const userGroupsCache = gRes.data.data; // Array of items: { group: { id }, role: { rank } }
+
         const uLookup = await axios.get(`https://users.roproxy.com/v1/users/${robloxId}`);
         const robloxName = uLookup.data.name;
-        
-        const sRolesMap = data.milestoneRoles[interaction.guildId] || {};
-        const sThresholds = data.milestoneThresholds[interaction.guildId] || {};
-        const primaryGroupId = data.groups?.[interaction.guildId];
-        
-        if (!primaryGroupId) return interaction.editReply("❌ Primary Roblox group configuration missing.");
-        
-        const primaryMatch = gRes.data.data.find(g => g.group.id.toString() === primaryGroupId.toString());
-        const mainGroupRank = primaryMatch ? primaryMatch.role.rank : 0;
 
+        // Process standard single binds against their respective saved Group IDs
         for (const b of serverBinds) {
             const role = interaction.guild.roles.cache.get(b.roleId);
             if (role) {
-                const currentBindGroupMatch = gRes.data.data.find(g => g.group.id.toString() === b.groupId.toString());
-                const specificUserRank = currentBindGroupMatch ? currentBindGroupMatch.role.rank : 0;
+                const targetedMatch = userGroupsCache.find(g => g.group.id.toString() === b.groupId.toString());
+                const specificUserRank = targetedMatch ? targetedMatch.role.rank : 0;
 
                 if (specificUserRank === b.rankId && netInvites >= (b.minInvites || 0)) { 
                     if (!targetMember.roles.cache.has(role.id)) { await targetMember.roles.add(role); added.push(role.name); }
                     await applyUserRankMutations(targetMember, robloxId, b, robloxName);
-                } else if (targetMember.roles.cache.has(role.id)) { await targetMember.roles.remove(role); removed.push(role.name); }
+                } else if (targetMember.roles.cache.has(role.id)) { 
+                    // Verify no other bind configured for another group is keeping this role active
+                    const safetyDuplicateCheck = serverBinds.some(otherB => {
+                        if (otherB.roleId !== b.roleId) return false;
+                        const altMatch = userGroupsCache.find(g => g.group.id.toString() === otherB.groupId.toString());
+                        return altMatch && altMatch.role.rank === otherB.rankId;
+                    });
+                    if (!safetyDuplicateCheck) {
+                        await targetMember.roles.remove(role); 
+                        removed.push(role.name); 
+                    }
+                }
             }
         }
 
-        for (const [categoryKey, roleIdsArray] of Object.entries(sRolesMap)) {
-            const minRequiredRank = sThresholds[categoryKey] ?? 0;
-            const qualifies = mainGroupRank >= minRequiredRank;
+        // Process cumulative milestones across their respective designated Group IDs
+        const sRolesMap = data.milestoneRoles[interaction.guildId] || {};
+        const sThresholds = data.milestoneThresholds[interaction.guildId] || {};
+
+        for (const [poolKey, roleIdsArray] of Object.entries(sRolesMap)) {
+            // poolKey format now incorporates group info: "groupid_categoryname"
+            const parsedMeta = poolKey.split('_');
+            const targetGroupId = parsedMeta[0];
+            
+            const targetedMatch = userGroupsCache.find(g => g.group.id.toString() === targetGroupId.toString());
+            const evaluatedRank = targetedMatch ? targetedMatch.role.rank : 0;
+
+            const minRequiredRank = sThresholds[poolKey] ?? 0;
+            const qualifies = evaluatedRank >= minRequiredRank;
+
             if (Array.isArray(roleIdsArray)) {
                 for (const rId of roleIdsArray) {
                     const discordRole = interaction.guild.roles.cache.get(rId);
@@ -522,14 +519,14 @@ async function runUpdateProcess(interaction, targetUser) {
         }
 
         const embed = new EmbedBuilder()
-            .setTitle("Clone Trooper Profile Synced")
+            .setTitle("Profile Synced Across Networks")
             .setColor(0x2ECC71) 
             .addFields(
-                { name: "Trooper Target Account:", value: `<@${targetUser.id}>`, inline: true },
-                { name: "Group Rank ID:", value: `\`${mainGroupRank}\``, inline: true }
+                { name: "Account:", value: `<@${targetUser.id}>`, inline: true },
+                { name: "Modifications processed:", value: added.length > 0 ? `+ ${added.join('\n+ ')}` : "No rank adjustments applied." }
             );
         return interaction.editReply({ embeds: [embed] });
-    } catch (e) { return interaction.editReply("❌ Update network handling threshold sequence code execution block error."); }
+    } catch (e) { console.error(e); return interaction.editReply("❌ Error processing updates across groups."); }
 }
 
 client.on('interactionCreate', async interaction => {
@@ -539,7 +536,7 @@ client.on('interactionCreate', async interaction => {
             return await runUpdateProcess(interaction, interaction.user);
         }
         if (interaction.customId === 'panel_link_btn') {
-            return interaction.reply({ content: "Execute command `/verify` to associate identity profile details.", flags: [MessageFlags.Ephemeral] });
+            return interaction.reply({ content: "Execute command `/verify` to link accounts.", flags: [MessageFlags.Ephemeral] });
         }
 
         if (interaction.customId === 'open_ticket_btn') {
@@ -559,13 +556,13 @@ client.on('interactionCreate', async interaction => {
                     ]
                 });
 
-                const welcomeTicketEmbed = new EmbedBuilder().setTitle(`🎫 Support Ticket #${countStr}`).setDescription(`Greetings <@${interaction.user.id}>,\n\nPlease supply your operational issue parameters here explicitly.`).setColor(0x3498DB);
+                const welcomeTicketEmbed = new EmbedBuilder().setTitle(`🎫 Support Ticket #${countStr}`).setDescription(`Supply inquiry parameters explicitly here.`).setColor(0x3498DB);
                 const closeActionRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('close_ticket_btn').setLabel('Close Ticket').setStyle(ButtonStyle.Danger));
 
                 await ticketChannel.send({ embeds: [welcomeTicketEmbed], components: [closeActionRow] });
-                dispatchLog(interaction.guildId, 'system', `🎟️ **Ticket Opened:** <@${interaction.user.id}> initialized support workspace entry channel frame <#${ticketChannel.id}>.`);
+                dispatchLog(interaction.guildId, 'system', `🎟️ **Ticket Opened:** <@${interaction.user.id}> initialized channel <#${ticketChannel.id}>.`);
                 return interaction.editReply(`✅ Support channel link built: <#${ticketChannel.id}>`);
-            } catch (err) { return interaction.editReply("❌ Pipeline permission allocation error."); }
+            } catch (err) { return interaction.editReply("❌ Pipeline allocation error."); }
         }
 
         if (interaction.customId === 'close_ticket_btn') {
@@ -579,44 +576,105 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel } = interaction;
 
-    // SEGREGATED INTERACTIVE MULTI-LOG DISPATCH ASSIGNMENT STATION SETUP COMMAND
     if (commandName === 'setup-logs') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        
         const categorySelection = options.getString('category');
         const targetChannel = options.getChannel('channel');
 
         if (!targetChannel.isTextBased()) return interaction.editReply("❌ Target allocation selection must be text-based.");
-        
         if (!data.logsChannels) data.logsChannels = { system: null, moderator: null, movement: null };
-        if (typeof data.logsChannels[categorySelection] !== 'object' || data.logsChannels[categorySelection] === null) {
-            data.logsChannels[categorySelection] = {};
-        }
+        if (!data.logsChannels[categorySelection]) data.logsChannels[categorySelection] = {};
         
         data.logsChannels[categorySelection][guildId] = targetChannel.id;
         saveData();
-
-        return interaction.editReply(`✅ **Segregated Log Channel Binding Complete:** Category **[${categorySelection}]** streams are now routing into channel: <#${targetChannel.id}>.`);
+        return interaction.editReply(`✅ Log configuration saved for channel: <#${targetChannel.id}>.`);
     }
 
-    // DISCORD INTERACTION LOGIC COMMAND PIPELINE ENTRIES
     if (commandName === 'purge') {
         if (!member.permissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
         const targetAmount = options.getInteger('amount');
-        if (targetAmount < 1 || targetAmount > 100) return interaction.editReply("❌ Clear metrics scope constraints must remain between 1 and 100 entries.");
+        if (targetAmount < 1 || targetAmount > 100) return interaction.editReply("❌ Metrics constraints must remain between 1 and 100 entries.");
 
         const clearPackets = await channel.bulkDelete(targetAmount, true).catch(() => []);
-        
-        const purgeEmbed = new EmbedBuilder()
-            .setTitle("🧹 Channel Text Stream Purged")
-            .setColor(0x95A5A6)
-            .setDescription(`**Moderator Execution:** <@${member.id}>\n**Target Location Channel:** <#${channel.id}>\n**Packets Dropped:** \`${clearPackets.size}\` entries.`)
-            .setTimestamp();
+        const purgeEmbed = new EmbedBuilder().setTitle("🧹 Channel Purged").setColor(0x95A5A6).setDescription(`Cleared \`${clearPackets.size}\` records.`).setTimestamp();
         dispatchLog(guildId, 'system', { embeds: [purgeEmbed] });
+        return interaction.editReply(`✅ Cleared \`${clearPackets.size}\` records.`);
+    }
 
-        return interaction.editReply(`✅ Text purge sequence finalized. Cleared \`${clearPackets.size}\` records.`);
+    if (commandName === 'bind') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        await interaction.deferReply();
+        
+        const groupId = options.getString('groupid').trim();
+        const rankId = options.getInteger('rankid');
+        const role = options.getRole('role');
+        const nicknameFormat = options.getString('nickname-format') || null;
+        const minInvites = options.getInteger('min-invites') || 0;
+
+        if (!data.binds[guildId]) data.binds[guildId] = [];
+        // Safely overlay duplicate binds specifically matching *this* group and rank combination
+        data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === groupId && b.rankId === rankId));
+        
+        data.binds[guildId].push({ groupId, rankId, roleId: role.id, nicknameFormat, minInvites });
+        saveData();
+        return interaction.editReply(`✅ Successfully linked **Group ${groupId} (Rank ${rankId})** directly to role <@&${role.id}>.`);
+    }
+
+    if (commandName === 'sync-group-roles') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        await interaction.deferReply();
+        const targetGroupId = options.getString('groupid').trim();
+        
+        try {
+            const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${targetGroupId}/roles`)).data.roles.filter(r => r.rank > 0).sort((a, b) => a.rank - b.rank);
+            if (!data.binds[guildId]) data.binds[guildId] = [];
+            const existingRoles = await interaction.guild.roles.fetch();
+
+            for (const r of rRoles) {
+                data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === targetGroupId && b.rankId === r.rank));
+                let existingRole = existingRoles.find(role => role.name === r.name);
+                if (!existingRole) existingRole = await interaction.guild.roles.create({ name: r.name, reason: `Auto-sync group ${targetGroupId}` });
+                data.binds[guildId].push({ groupId: targetGroupId, rankId: r.rank, roleId: existingRole.id, nicknameFormat: null, minInvites: 0 });
+            }
+            saveData();
+            return interaction.editReply(`🎉 **Sync complete!** All ranks for Group \`${targetGroupId}\` have been generated and mapped.`);
+        } catch (e) { return interaction.editReply(`❌ Sync failed: ${e.message}`); }
+    }
+
+    if (commandName === 'setup-milestones') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        await interaction.deferReply();
+
+        const targetGroupId = options.getString('groupid').trim();
+        const categoryName = options.getString('category-name').toLowerCase().replace(/\s+/g, '_');
+        const rolesListString = options.getString('roles-list');
+        const minRank = options.getInteger('min-rank');
+        const parsedIds = [...rolesListString.matchAll(/\d+/g)].map(match => match[0]);
+
+        if (!parsedIds.length) return interaction.editReply("❌ No valid Discord roles extracted.");
+        
+        // Unique tracking token incorporating group structure
+        const storagePoolKey = `${targetGroupId}_${categoryName}`;
+
+        if (!data.milestoneRoles) data.milestoneRoles = {};
+        if (!data.milestoneThresholds) data.milestoneThresholds = {};
+        if (!data.milestoneRoles[guildId]) data.milestoneRoles[guildId] = {};
+        if (!data.milestoneThresholds[guildId]) data.milestoneThresholds[guildId] = {};
+
+        data.milestoneRoles[guildId][storagePoolKey] = parsedIds;
+        data.milestoneThresholds[guildId][storagePoolKey] = minRank;
+        saveData();
+        return interaction.editReply(`✅ Milestone saved. Anyone at or above **Rank ${minRank}** in **Group ${targetGroupId}** receives these pool roles.`);
+    }
+
+    if (commandName === 'view-binds') {
+        await interaction.deferReply();
+        const serverBinds = data.binds ? data.binds[guildId] : [];
+        if (!serverBinds.length) return interaction.editReply("❌ No active group binds configured.");
+        let bindList = serverBinds.map(b => `• **Group ${b.groupId} (Rank ${b.rankId})** → <@&${b.roleId}>`);
+        return interaction.editReply({ embeds: [new EmbedBuilder().setTitle("Configured Multi-Group Binds").setDescription(bindList.join('\n'))] });
     }
 
     if (commandName === 'autorole') {
@@ -628,8 +686,8 @@ client.on('interactionCreate', async interaction => {
 
         if (!selectedRole) {
             const activeIds = data.autoroles[guildId];
-            if (!activeIds.length) return interaction.editReply("ℹ️ No autorole configurations active on this server yet.");
-            return interaction.editReply(`ℹ️ Active welcome roles pool: ${activeIds.map(id => `<@&${id}>`).join(', ')}`);
+            if (!activeIds.length) return interaction.editReply("ℹ️ No active welcome configurations.");
+            return interaction.editReply(`ℹ️ Active roles: ${activeIds.map(id => `<@&${id}>`).join(', ')}`);
         }
 
         if (data.autoroles[guildId].includes(selectedRole.id)) {
@@ -639,7 +697,7 @@ client.on('interactionCreate', async interaction => {
         } else {
             data.autoroles[guildId].push(selectedRole.id);
             saveData();
-            return interaction.editReply(`✅ **Autorole Added:** <@&${selectedRole.id}> bound to welcome grid layer.`);
+            return interaction.editReply(`✅ **Autorole Added:** <@&${selectedRole.id}> added.`);
         }
     }
 
@@ -648,11 +706,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.deferReply();
         const targetUser = options.getUser('target');
         const coreReason = options.getString('reason') || "No formal reasoning logged.";
-        
         await interaction.guild.members.ban(targetUser, { reason: coreReason });
-        
-        const modEmbed = new EmbedBuilder().setTitle("🚨 Ban Action Registered").setColor(0xC0392B).setDescription(`**Target:** <@${targetUser.id}>\n**Execution Agent:** <@${member.id}>\n**Reasoning:** ${coreReason}`).setTimestamp();
-        dispatchLog(guildId, 'system', { embeds: [modEmbed] });
         return interaction.editReply("🚨 Account banned.");
     }
 
@@ -662,8 +716,6 @@ client.on('interactionCreate', async interaction => {
         const userIdInput = options.getString('userid');
         try {
             await interaction.guild.members.unban(userIdInput);
-            const modEmbed = new EmbedBuilder().setTitle("🔓 Ban Revocation Processed").setColor(0x27AE60).setDescription(`**Target ID Record:** \`${userIdInput}\` unbanned by <@${member.id}>`).setTimestamp();
-            dispatchLog(guildId, 'system', { embeds: [modEmbed] });
             return interaction.editReply(`✅ Successfully unbanned user ID: \`${userIdInput}\``);
         } catch (err) { return interaction.editReply(`❌ Action failed: ${err.message}`); }
     }
@@ -671,38 +723,21 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'kick') {
         if (!member.permissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        const targetMember = options.getMember('target');
-        const coreReason = options.getString('reason') || "No formal reasoning logged.";
-        
-        await targetMember.kick(coreReason);
-        
-        const modEmbed = new EmbedBuilder().setTitle("👢 Kick Action Registered").setColor(0xD35400).setDescription(`**Target Member:** <@${targetMember.id}>\n**Execution Agent:** <@${member.id}>\n**Reasoning:** ${coreReason}`).setTimestamp();
-        dispatchLog(guildId, 'system', { embeds: [modEmbed] });
+        await options.getMember('target').kick();
         return interaction.editReply("👢 Member kicked.");
     }
 
     if (commandName === 'timeout') {
         if (!member.permissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        const targetMember = options.getMember('target');
-        const durationMins = options.getInteger('minutes');
-        
-        await targetMember.timeout(durationMins * 60 * 1000);
-        
-        const modEmbed = new EmbedBuilder().setTitle("⏳ Isolation Timeout Enforced").setColor(0xE67E22).setDescription(`**Target Member:** <@${targetMember.id}>\n**Agent Control:** <@${member.id}>\n**Metrics Scale:** Duration set to \`${durationMins}\` minutes.`).setTimestamp();
-        dispatchLog(guildId, 'system', { embeds: [modEmbed] });
+        await options.getMember('target').timeout(options.getInteger('minutes') * 60 * 1000);
         return interaction.editReply("⏳ Member isolated.");
     }
 
     if (commandName === 'unmute') {
         if (!member.permissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        const targetMember = options.getMember('target');
-        if (!targetMember) return interaction.editReply("❌ Target member invalid.");
-        
-        await targetMember.timeout(null);
-        const modEmbed = new EmbedBuilder().setTitle("🔊 Timeout Restraint Lifted").setColor(0x2ECC71).setDescription(`**Target member account:** <@${targetMember.id}> restored by <@${member.id}>.`).setTimestamp();
-        dispatchLog(guildId, 'system', { embeds: [modEmbed] });
+        await options.getMember('target').timeout(null);
         return interaction.editReply("🔊 Isolation lifted.");
     }
 
@@ -710,44 +745,6 @@ client.on('interactionCreate', async interaction => {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
         return await runUpdateProcess(interaction, options.getUser('target'));
-    }
-
-    if (commandName === 'setup-milestones') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        await interaction.deferReply();
-        const categoryName = options.getString('category-name').toLowerCase().replace(/\s+/g, '_');
-        const rolesListString = options.getString('roles-list');
-        const minRank = options.getInteger('min-rank');
-        const parsedIds = [...rolesListString.matchAll(/\d+/g)].map(match => match[0]);
-
-        if (!parsedIds.length) return interaction.editReply("❌ No valid Discord roles extracted.");
-        if (!data.milestoneRoles) data.milestoneRoles = {};
-        if (!data.milestoneThresholds) data.milestoneThresholds = {};
-        if (!data.milestoneRoles[guildId]) data.milestoneRoles[guildId] = {};
-        if (!data.milestoneThresholds[guildId]) data.milestoneThresholds[guildId] = {};
-
-        data.milestoneRoles[guildId][categoryName] = parsedIds;
-        data.milestoneThresholds[guildId][categoryName] = minRank;
-        saveData();
-        return interaction.editReply(`✅ Milestone configurations saved under key label \`${categoryName}\`.`);
-    }
-
-    if (commandName === 'bind') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        await interaction.deferReply();
-        const rankId = options.getInteger('rankid');
-        const role = options.getRole('role');
-        const nicknameFormat = options.getString('nickname-format') || null;
-        const minInvites = options.getInteger('min-invites') || 0;
-        const groupId = data.groups?.[guildId];
-
-        if (!groupId) return interaction.editReply("❌ Associate Roblox Group ID profile mapping via \`/setup-group\` first.");
-        if (!data.binds[guildId]) data.binds[guildId] = [];
-        data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === groupId && b.rankId === rankId));
-        
-        data.binds[guildId].push({ groupId, rankId, roleId: role.id, nicknameFormat, minInvites });
-        saveData();
-        return interaction.editReply(`✅ Bound Rank \`${rankId}\` directly to role target <@&${role.id}>.`);
     }
 
     if (commandName === 'antimention') {
@@ -765,7 +762,7 @@ client.on('interactionCreate', async interaction => {
             data.protectedTargets[guildId] = { userId: protectUser ? protectUser.id : null, roleId: protectRole ? protectRole.id : null };
         }
         saveData();
-        return interaction.editReply(`🛡️ Anti-Mention tracking parameters synchronized successfully.`);
+        return interaction.editReply(`🛡️ Anti-Mention parameters synchronized.`);
     }
 
     if (commandName === 'antimention-remove') {
@@ -774,7 +771,7 @@ client.on('interactionCreate', async interaction => {
         if (data.antimention) data.antimention[guildId] = false;
         if (data.protectedTargets) data.protectedTargets[guildId] = { userId: null, roleId: null };
         saveData();
-        return interaction.editReply("✅ Anti-mention shield variables wiped clean.");
+        return interaction.editReply("✅ Anti-mention shield wiped.");
     }
 
     if (commandName === 'security-config') {
@@ -784,10 +781,9 @@ client.on('interactionCreate', async interaction => {
         const customThreshold = options.getInteger('beast-threshold');
         const finalLimit = customThreshold !== null ? customThreshold : (data.security[guildId]?.limit || 4);
 
-        if (finalLimit < 1) return interaction.editReply("❌ Limit floor must exceed 0.");
         data.security[guildId] = { enabled: activeSetting, beastMode: data.security[guildId]?.beastMode || false, limit: finalLimit };
         saveData();
-        return interaction.editReply(`🛡️ Automated security perimeter configuration elements locked.`);
+        return interaction.editReply(`🛡️ Security infrastructure parameters saved.`);
     }
 
     if (commandName === 'beast-disable') {
@@ -795,7 +791,7 @@ client.on('interactionCreate', async interaction => {
         await interaction.deferReply();
         if (data.security[guildId]) data.security[guildId].beastMode = false;
         saveData();
-        return interaction.editReply("✅ **BEAST MODE EMERGENCY THRESHOLD RESET FINALIZED.**");
+        return interaction.editReply("✅ **BEAST MODE RESET FINALIZED.**");
     }
 
     if (commandName === 'say') {
@@ -808,7 +804,7 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'verification-panel') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        const panelEmbed = new EmbedBuilder().setTitle("Identity Tracking System").setDescription("Click buttons below to modify connection values.").setColor(0x355eed);
+        const panelEmbed = new EmbedBuilder().setTitle("Identity Hub").setDescription("Interact below to update linked profiles.").setColor(0x355eed);
         const row = new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('panel_link_btn').setLabel('Link Roblox Account').setStyle(ButtonStyle.Success),
             new ButtonBuilder().setCustomId('panel_update_btn').setLabel('Update Profile Sync').setStyle(ButtonStyle.Secondary)
@@ -823,7 +819,7 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         }
         const wait = checkCooldown(interaction.user.id, commandName, 5);
-        if (wait) return interaction.reply({ content: `⏳ Cooldown active: ${wait}s`, flags: [MessageFlags.Ephemeral] });
+        if (wait) return interaction.reply({ content: `⏳ Cooldown: ${wait}s`, flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
         return await runVerificationProcess(interaction, options.getString('username'), targetUser || interaction.user);
     }
@@ -832,56 +828,18 @@ client.on('interactionCreate', async interaction => {
         if (options.getSubcommand() === 'setup') {
             if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
             await interaction.deferReply();
-            const ticketEmbed = new EmbedBuilder().setTitle("🎫 Support Desk Operations Panel").setDescription("Engage the ticket creation module to lock a transmission line to support.").setColor(0x2ECC71);
-            const btnRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('open_ticket_btn').setLabel('Open Support Request Container').setStyle(ButtonStyle.Primary).setEmoji('📩'));
+            const ticketEmbed = new EmbedBuilder().setTitle("🎫 Support Operations Panel").setDescription("Engage module to open a ticket workspace.").setColor(0x2ECC71);
+            const btnRow = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('open_ticket_btn').setLabel('Open Ticket').setStyle(ButtonStyle.Primary).setEmoji('📩'));
             await channel.send({ embeds: [ticketEmbed], components: [btnRow] });
-            return interaction.editReply("✅ Interactive support layout panel matrix online.");
+            return interaction.editReply("✅ Interactive support panel online.");
         }
-    }
-
-    if (commandName === 'setup-group') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        await interaction.deferReply();
-        if (!data.groups) data.groups = {};
-        data.groups[guildId] = options.getString('groupid');
-        saveData();
-        return interaction.editReply("✅ Core primary Group mapping assignment successful.");
-    }
-
-    if (commandName === 'sync-group-roles') {
-        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
-        await interaction.deferReply();
-        const gId = data.groups ? data.groups[guildId] : null;
-        if (!gId) return interaction.editReply("❌ Set target Group link first via \`/setup-group\`.");
-        try {
-            const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${gId}/roles`)).data.roles.filter(r => r.rank > 0).sort((a, b) => a.rank - b.rank);
-            if (!data.binds[guildId]) data.binds[guildId] = [];
-            const existingRoles = await interaction.guild.roles.fetch();
-
-            for (const r of rRoles) {
-                data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === gId && b.rankId === r.rank));
-                let existingRole = existingRoles.find(role => role.name === r.name);
-                if (!existingRole) existingRole = await interaction.guild.roles.create({ name: r.name, reason: 'Auto-sync hierarchy mapping' });
-                data.binds[guildId].push({ groupId: gId, rankId: r.rank, roleId: existingRole.id, nicknameFormat: null, minInvites: 0 });
-            }
-            saveData();
-            return interaction.editReply("🎉 Structural hierarchy roles sync cycle finished perfectly.");
-        } catch (e) { return interaction.editReply(`❌ Execution anomaly failure: ${e.message}`); }
-    }
-
-    if (commandName === 'view-binds') {
-        await interaction.deferReply();
-        const serverBinds = data.binds ? data.binds[guildId] : [];
-        if (!serverBinds.length) return interaction.editReply("❌ Configuration records clear.");
-        let bindList = serverBinds.map(b => `• **Rank ID ${b.rankId}** linked directly to target element role <@&${b.roleId}>`);
-        return interaction.editReply({ embeds: [new EmbedBuilder().setTitle("Active Bind Track Arrays").setDescription(bindList.join('\n'))] });
     }
 
     if (commandName === 'update') {
         await interaction.deferReply();
         const targetUser = options.getUser('user') || interaction.user;
         if (targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.editReply("❌ Profile synchronization authorization breach.");
+            return interaction.editReply("❌ Unauthorized profile sync.");
         }
         return await runUpdateProcess(interaction, targetUser);
     }
@@ -890,13 +848,13 @@ client.on('interactionCreate', async interaction => {
         await interaction.deferReply();
         const serverInvs = data.invites[guildId] || {};
         const sorted = Object.entries(serverInvs).map(([id, val]) => ({ id, total: (val.regular || 0) - (val.left || 0) + (val.bonus || 0) })).sort((a, b) => b.total - a.total).slice(0, 10);
-        if (!sorted.length) return interaction.editReply("No active invite fields compiled.");
-        let lines = sorted.map((u, i) => `\`#${i + 1}\` <@${u.id}> total score: **${u.total}** functional metric invitations.`);
-        return interaction.editReply({ embeds: [new EmbedBuilder().setTitle("Invitation Analytics Grid").setDescription(lines.join('\n')).setColor(0x00FFFF)] });
+        if (!sorted.length) return interaction.editReply("No invite entries found.");
+        let lines = sorted.map((u, i) => `\`#${i + 1}\` <@${u.id}>: **${u.total}** invites.`);
+        return interaction.editReply({ embeds: [new EmbedBuilder().setTitle("Leaderboard").setDescription(lines.join('\n')).setColor(0x00FFFF)] });
     }
 
     if (commandName === 'giveaway') {
-        return interaction.reply({ content: "🎉 Systems running processing protocols...", flags: [MessageFlags.Ephemeral] });
+        return interaction.reply({ content: "🎉 Systems operational...", flags: [MessageFlags.Ephemeral] });
     }
 });
 
