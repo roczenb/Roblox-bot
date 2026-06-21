@@ -199,8 +199,11 @@ const commands = [
     new SlashCommandBuilder().setName('tickets').setDescription('Manage the ticketing system pipeline')
         .addSubcommand(s => s.setName('setup').setDescription('Admin Only: Send the interactive support panel to this channel')),
     new SlashCommandBuilder().setName('purge').setDescription('Admin Only: Delete bulk message packets')
-        .addIntegerOption(o => o.setName('amount').setDescription('Number of messages to clear').setRequired(true))
+        .addIntegerOption(o => o.setName('amount').setDescription('Number of messages to clear').setRequired(true)),
+    new SlashCommandBuilder().setName('mass-sync-divisions').setDescription('Admin Only: Mass sync multiple Roblox group ranks and milestone tracks simultaneously')
+        .addStringOption(o => o.setName('group-ids').setDescription('Paste space-separated group IDs').setRequired(true))
 ].map(c => c.toJSON());
+
 
 client.once('ready', async () => {
     console.log(`Logged in as ${client.user.tag}`);
