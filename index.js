@@ -117,9 +117,6 @@ const commands = [
     
     new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto-bind an entire group structure by chain of command')
         .addStringOption(o => o.setName('groupid').setDescription('Roblox Group ID to completely map out').setRequired(true)),
-
-    new SlashCommandBuilder().setName('mass-sync-divisions').setDescription('Admin Only: Provide a space-separated list of group IDs to sync all ranks and milestone tracks at once')
-        .addStringOption(o => o.setName('group-ids').setDescription('Paste space-separated group IDs').setRequired(true)),
     
     new SlashCommandBuilder().setName('bind').setDescription('Bind a specific rank to a role')
         .addStringOption(o => o.setName('groupid').setDescription('Roblox Group ID').setRequired(true))
@@ -200,6 +197,7 @@ const commands = [
         .addSubcommand(s => s.setName('setup').setDescription('Admin Only: Send the interactive support panel to this channel')),
     new SlashCommandBuilder().setName('purge').setDescription('Admin Only: Delete bulk message packets')
         .addIntegerOption(o => o.setName('amount').setDescription('Number of messages to clear').setRequired(true)),
+
     new SlashCommandBuilder().setName('mass-sync-divisions').setDescription('Admin Only: Mass sync multiple Roblox group ranks and milestone tracks simultaneously')
         .addStringOption(o => o.setName('group-ids').setDescription('Paste space-separated group IDs').setRequired(true))
 ].map(c => c.toJSON());
