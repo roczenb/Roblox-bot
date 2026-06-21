@@ -43,6 +43,9 @@ let data = {
     logsChannel: {} 
 };
 
+// Temporary cache to hold active verification codes
+const verificationCodes = new Map();
+
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
 const ANTIMENTION_BYPASS_ROLE = "Speaker of the Senate"; 
 
@@ -324,8 +327,32 @@ async function applyUserRankMutations(member, robloxId, bindConfig, username) {
 async function runVerificationProcess(interaction, usernameInput, targetUser) {
     try {
         const res = await axios.post('https://users.roproxy.com/v1/usernames/users', { usernames: [usernameInput], excludeBannedUsers: true });
-        if (!res.data.data.length) return interaction.editReply("❌ User not found.");
+        if (!res.data.data.length) return interaction.editReply("❌ User not found on Roblox.");
         const rId = res.data.data[0].id;
+        
+        // --- SECURE OATH PROTOCOL: ACCOUNT BIO LOOKUP ---
+        const lookupKey = `verify_${interaction.user.id}`;
+        const activePendingCode = verificationCodes.get(lookupKey);
+
+        const profileLookup = await axios.get(`https://users.roproxy.com/v1/users/${rId}`);
+        const userDescription = profileLookup.data.description || "";
+
+        if (!activePendingCode || !userDescription.includes(activePendingCode)) {
+            // Generate a fresh code and challenge the user to update their status description
+            const generatedSecretCode = `CT-${Math.floor(100000 + Math.random() * 900000)}`;
+            verificationCodes.set(lookupKey, generatedSecretCode);
+
+            const challengeEmbed = new EmbedBuilder()
+                .setTitle("🛡️ Confirm Profile Ownership")
+                .setDescription(`To verify as **${usernameInput}**, please append the security token below inside your Roblox account **About** bio text description.\n\nOnce updated, rerun the command \`/verify username:${usernameInput}\` to link successfully.`)
+                .addFields({ name: "Required Verification Key:", value: `\`${generatedSecretCode}\`` })
+                .setColor(0xF1C40F);
+            
+            return interaction.editReply({ embeds: [challengeEmbed] });
+        }
+
+        // Clean cache tokens on clear match confirmation success
+        verificationCodes.delete(lookupKey);
         
         data.users[targetUser.id] = rId;
         saveData();
@@ -364,7 +391,6 @@ async function runUpdateProcess(interaction, targetUser) {
         const sRolesMap = data.milestoneRoles[interaction.guildId] || {};
         const sThresholds = data.milestoneThresholds[interaction.guildId] || {};
 
-        // Lock primary group precisely to prevent spoofing or shifting display values
         const primaryGroupId = data.groups?.[interaction.guildId];
         if (!primaryGroupId) {
             return interaction.editReply("❌ Primary group configuration missing. Please run `/setup-group` to assign a valid group ID.");
@@ -682,17 +708,20 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'verify') {
-        const wait = checkCooldown(interaction.user.id, commandName, 5);
-        if (wait) return interaction.reply({ content: `⏳ Cooldown active: ${wait}s`, flags: [MessageFlags.Ephemeral] });
-        await interaction.deferReply();
+        const targetUser = options.getUser('target');
 
-        const targetUser = options.getUser('target') || interaction.user;
-
-        if (targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
-            return interaction.editReply("❌ You do not have permission to verify other members.");
+        // STRICT ACCESS CONTROL CHECK: Only admins can specify a target other than themselves
+        if (targetUser && targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.reply({ content: "❌ Access Denied: You are not an Administrator. You are only allowed to verify your own account.", flags: [MessageFlags.Ephemeral] });
         }
 
-        return await runVerificationProcess(interaction, options.getString('username'), targetUser);
+        const wait = checkCooldown(interaction.user.id, commandName, 5);
+        if (wait) return interaction.reply({ content: `⏳ Cooldown active: ${wait}s`, flags: [MessageFlags.Ephemeral] });
+        
+        await interaction.deferReply();
+        const activeTarget = targetUser || interaction.user;
+
+        return await runVerificationProcess(interaction, options.getString('username'), activeTarget);
     }
 
     if (commandName === 'setup-group') {
