@@ -195,7 +195,7 @@ client.once('ready', async () => {
         for (const [guildId] of guilds) {
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
         }
-        console.log('Bot fully armed and setup with Dyno-style command layout infrastructure configurations!');
+        console.log('Bot fully loaded with dynamic text prefix commands and slash functionality.');
     } catch (e) { console.error(e); }
 });
 
@@ -370,34 +370,102 @@ client.on('roleDelete', role => { if (role.guild) incrementSecurityTrigger(role.
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
-    // --- PREFIX BASED COMMAND LISTENER FORMAT ---
+    // --- SEPARATE INDIVIDUAL TEXT PREFIX COMMAND HANDLING PIPELINE ---
     if (message.content.startsWith('?')) {
         const structuralArgs = message.content.slice(1).trim().split(/ +/);
         const invokerTarget = structuralArgs.shift().toLowerCase();
 
+        // ?moderation help command block
         if (invokerTarget === 'moderation' || invokerTarget === 'mod') {
             const hasModPerms = message.member.permissions.has(PermissionFlagsBits.ManageMessages) || 
                                 message.member.permissions.has(PermissionFlagsBits.KickMembers) || 
                                 message.member.permissions.has(PermissionFlagsBits.BanMembers);
             if (!hasModPerms) return;
 
-            // DYNO BOT EMBED SCHEMATIC ARCHITECTURE
             const dynoHelpMenuEmbed = new EmbedBuilder()
-                .setColor(0x3498DB) // Official Dyno Vibrant Dodger Blue Color Profile
+                .setColor(0x3498DB)
                 .setAuthor({ name: `${client.user.username} Help`, iconURL: client.user.displayAvatarURL() })
                 .setTitle("Moderator Commands")
-                .setDescription(`Custom modules running active across server networks.\nPrefix: \`?\` | Run \`?help [command]\` to view extended info bounds.`)
+                .setDescription(`Custom modules running active across server networks.\nPrefix: \`?\``)
                 .addFields(
                     { name: "⚙️ ?purge `[count]`", value: "Delete packages of text logs up to a 100 record limitation buffer.", inline: false },
-                    { name: "🔨 ?ban `[user]` `(reason)`", value: "Permanently restrict and ban malicious endpoints from access networks.", inline: false },
-                    { name: "👢 ?kick `[user]` `(reason)`", value: "Forcibly eject a targeted profile link connection from the guild matrix.", inline: false },
-                    { name: "⏳ ?timeout `[user]` `[minutes]`", value: "Apply a text silencer and restrict message creation variables completely.", inline: false },
-                    { name: "🔊 ?unmute `[user]`", value: "Lift isolation and manually restore text communication capability metrics.", inline: false }
+                    { name: "🔨 ?ban `[user/ID]` `(reason)`", value: "Permanently restrict and ban malicious endpoints from access networks.", inline: false },
+                    { name: "👢 ?kick `[user/ID]` `(reason)`", value: "Forcibly eject a targeted profile link connection from the guild matrix.", inline: false },
+                    { name: "⏳ ?timeout `[user/ID]` `[minutes]`", value: "Apply a text silencer and restrict message creation variables completely.", inline: false },
+                    { name: "🔊 ?unmute `[user/ID]`", value: "Lift isolation and manually restore text communication capability metrics.", inline: false }
                 )
                 .setFooter({ text: `${message.guild.name} • Page 1 of 1`, iconURL: message.guild.iconURL() })
                 .setTimestamp();
 
             return message.channel.send({ embeds: [dynoHelpMenuEmbed] });
+        }
+
+        // ?purge command logic
+        if (invokerTarget === 'purge') {
+            if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) return;
+            const count = parseInt(structuralArgs[0]);
+            if (!count || isNaN(count) || count < 1 || count > 100) {
+                return message.reply("⚠️ Specify an explicit bulk deletion amount between 1 and 100 messages.");
+            }
+            await message.delete().catch(() => {});
+            const cleared = await message.channel.bulkDelete(count, true).catch(() => []);
+            const logEmbed = new EmbedBuilder().setTitle("🧹 Channel Purged").setColor(0x95A5A6).setDescription(`Cleared \`${cleared.size || cleared}\` records via text command format.`).setTimestamp();
+            dispatchLog(message.guild.id, 'system', { embeds: [logEmbed] });
+            const feedback = await message.channel.send(`✅ Success: Cleared \`${cleared.size || cleared}\` messages context parameters.`);
+            return setTimeout(() => feedback.delete().catch(() => {}), 4000);
+        }
+
+        // Helper resolver for raw ping parameters or direct numeric IDs
+        const resolveTargetMember = async (argString) => {
+            if (!argString) return null;
+            const strictId = argString.replace(/[<@!>]/g, '');
+            return await message.guild.members.fetch(strictId).catch(() => null);
+        };
+
+        // ?ban command logic
+        if (invokerTarget === 'ban') {
+            if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) return;
+            const targetUser = await resolveTargetMember(structuralArgs[0]);
+            if (!targetUser) return message.reply("⚠️ Unable to verify targeted entity structure variable. Supply a valid mention or ID.");
+            const reason = structuralArgs.slice(1).join(" ") || "No reason specified.";
+            
+            await targetUser.ban({ reason: reason });
+            return message.reply(`🔨 **${targetUser.user.tag}** has been banned from the server grid matrix.`);
+        }
+
+        // ?kick command logic
+        if (invokerTarget === 'kick') {
+            if (!message.member.permissions.has(PermissionFlagsBits.KickMembers)) return;
+            const targetUser = await resolveTargetMember(structuralArgs[0]);
+            if (!targetUser) return message.reply("⚠️ Unable to verify targeted entity structure variable. Supply a valid mention or ID.");
+            const reason = structuralArgs.slice(1).join(" ") || "No reason specified.";
+
+            await targetUser.kick(reason);
+            return message.reply(`👢 **${targetUser.user.tag}** was forcibly expelled.`);
+        }
+
+        // ?timeout command logic
+        if (invokerTarget === 'timeout') {
+            if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
+            const targetUser = await resolveTargetMember(structuralArgs[0]);
+            const dynamicMinutes = parseInt(structuralArgs[1]);
+
+            if (!targetUser || isNaN(dynamicMinutes) || dynamicMinutes <= 0) {
+                return message.reply("⚠️ Usage: `?timeout [@user/ID] [minutes]`");
+            }
+
+            await targetUser.timeout(dynamicMinutes * 60 * 1000);
+            return message.reply(`⏳ **${targetUser.user.tag}** isolated into isolation cells for ${dynamicMinutes} minutes.`);
+        }
+
+        // ?unmute command logic
+        if (invokerTarget === 'unmute') {
+            if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
+            const targetUser = await resolveTargetMember(structuralArgs[0]);
+            if (!targetUser) return message.reply("⚠️ Supply an active user trace parameters.");
+
+            await targetUser.timeout(null);
+            return message.reply(`🔊 Communication channel array elements restored for **${targetUser.user.tag}**.`);
         }
     }
 
