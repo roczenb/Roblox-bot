@@ -44,6 +44,7 @@ let data = {
     milestoneThresholds: {},
     logsChannels: { system: null, moderator: null, movement: null },
     verifiedRoleId: {}, 
+    unverifiedRoleId: {},
     ticketCounter: {}
 };
 
@@ -74,6 +75,7 @@ function loadData() {
             if (!data.milestoneThresholds) data.milestoneThresholds = {};
             if (!data.logsChannels) data.logsChannels = { system: null, moderator: null, movement: null };
             if (!data.verifiedRoleId) data.verifiedRoleId = {};
+            if (!data.unverifiedRoleId) data.unverifiedRoleId = {};
             if (!data.ticketCounter) data.ticketCounter = {};
         }
     } catch (e) { console.log("Data loaded smoothly."); }
@@ -142,6 +144,9 @@ const commands = [
         .addChannelOption(o => o.setName('channel').setDescription('Target stream destination channel text frame').setRequired(true)),
 
     new SlashCommandBuilder().setName('setup-verified-role').setDescription('Admin Only: Set the role automatically awarded upon successful verification')
+        .addRoleOption(o => o.setName('role').setDescription('The Discord role to assign').setRequired(true)),
+
+    new SlashCommandBuilder().setName('setup-unverified-role').setDescription('Admin Only: Set the role automatically awarded to unverified users')
         .addRoleOption(o => o.setName('role').setDescription('The Discord role to assign').setRequired(true)),
 
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
@@ -214,6 +219,13 @@ client.on('guildMemberAdd', async member => {
         } catch (e) { console.error(e); }
     }
 
+    // Auto assign unverified role if mapped out
+    const activeUnverifiedId = data.unverifiedRoleId?.[member.guild.id];
+    if (activeUnverifiedId) {
+        const targetUnvRole = member.guild.roles.cache.get(activeUnverifiedId);
+        if (targetUnvRole) await member.roles.add(targetUnvRole).catch(() => {});
+    }
+
     const activeAutoRoleIds = data.autoroles?.[member.guild.id];
     if (Array.isArray(activeAutoRoleIds) && activeAutoRoleIds.length > 0) {
         for (const rId of activeAutoRoleIds) {
@@ -277,7 +289,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
 
     if (oldRoles.size !== newRoles.size) {
         const addedRoles = newRoles.filter(role => !oldRoles.has(role.id));
-        const removedRoles = oldRoles.filter(role => !oldRoles.has(role.id));
+        const removedRoles = oldRoles.filter(role => !newRoles.has(role.id));
 
         const updateEmbed = new EmbedBuilder()
             .setTitle("🛡️ Member Role Modification")
@@ -405,7 +417,12 @@ client.on('messageCreate', async message => {
             if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) return;
             const count = parseInt(structuralArgs[0]);
             if (!count || isNaN(count) || count < 1 || count > 100) {
-                return message.reply("**Command: ?purge**\n\n**Description:** Delete patches of text logs in bulk.\n**Cooldown:** 3 seconds\n**Usage:**\n?purge [count]\n\n**Example:**\n?purge 50");
+                const helpEmbed = new EmbedBuilder()
+                    .setTitle("Command: ?purge")
+                    .setColor(0x3498DB)
+                    .setDescription("**Description:** Delete patches of text logs in bulk.\n**Cooldown:** 3 seconds\n**Usage:**\n`?purge [count]`\n\n**Example:**\n`?purge 50`")
+                    .setTimestamp();
+                return message.channel.send({ embeds: [helpEmbed] });
             }
             await message.delete().catch(() => {});
             const cleared = await message.channel.bulkDelete(count, true).catch(() => []);
@@ -427,7 +444,12 @@ client.on('messageCreate', async message => {
             if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
             if (!targetUser) {
-                return message.reply("**Command: ?ban**\n\n**Description:** Permanently ban a member from the network matrix.\n**Cooldown:** 3 seconds\n**Usage:**\n?ban [user] [reason]\n\n**Example:**\n?ban @NoobLance Terminated.");
+                const helpEmbed = new EmbedBuilder()
+                    .setTitle("Command: ?ban")
+                    .setColor(0x3498DB)
+                    .setDescription("**Description:** Permanently ban a member from the network matrix.\n**Cooldown:** 3 seconds\n**Usage:**\n`?ban [user] [reason]`\n\n**Example:**\n`?ban @NoobLance Terminated.`")
+                    .setTimestamp();
+                return message.channel.send({ embeds: [helpEmbed] });
             }
             const reason = structuralArgs.slice(1).join(" ") || "No reason specified.";
             await targetUser.ban({ reason: reason });
@@ -439,7 +461,12 @@ client.on('messageCreate', async message => {
             if (!message.member.permissions.has(PermissionFlagsBits.KickMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
             if (!targetUser) {
-                return message.reply("**Command: ?kick**\n\n**Description:** Kick a member.\n**Cooldown:** 3 seconds\n**Usage:**\n?kick [user] [reason]\n\n**Example:**\n?kick @NoobLance Get out!");
+                const helpEmbed = new EmbedBuilder()
+                    .setTitle("Command: ?kick")
+                    .setColor(0x3498DB)
+                    .setDescription("**Description:** Kick a member from the server.\n**Cooldown:** 3 seconds\n**Usage:**\n`?kick [user] [reason]`\n\n**Example:**\n`?kick @NoobLance Get out!`")
+                    .setTimestamp();
+                return message.channel.send({ embeds: [helpEmbed] });
             }
             const reason = structuralArgs.slice(1).join(" ") || "No reason specified.";
             await targetUser.kick(reason);
@@ -453,7 +480,12 @@ client.on('messageCreate', async message => {
             const dynamicMinutes = parseInt(structuralArgs[1]);
 
             if (!targetUser || isNaN(dynamicMinutes) || dynamicMinutes <= 0) {
-                return message.reply("**Command: ?timeout**\n\n**Description:** Put a member in temporary isolation.\n**Cooldown:** 3 seconds\n**Usage:**\n?timeout [user] [minutes]\n\n**Example:**\n?timeout @NoobLance 10");
+                const helpEmbed = new EmbedBuilder()
+                    .setTitle("Command: ?timeout")
+                    .setColor(0x3498DB)
+                    .setDescription("**Description:** Put a member in temporary isolation.\n**Cooldown:** 3 seconds\n**Usage:**\n`?timeout [user] [minutes]`\n\n**Example:**\n`?timeout @NoobLance 10`")
+                    .setTimestamp();
+                return message.channel.send({ embeds: [helpEmbed] });
             }
 
             await targetUser.timeout(dynamicMinutes * 60 * 1000);
@@ -465,7 +497,12 @@ client.on('messageCreate', async message => {
             if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
             if (!targetUser) {
-                return message.reply("**Command: ?unmute**\n\n**Description:** Restore text capability arrays to muted targets.\n**Cooldown:** 3 seconds\n**Usage:**\n?unmute [user]\n\n**Example:**\n?unmute @NoobLance");
+                const helpEmbed = new EmbedBuilder()
+                    .setTitle("Command: ?unmute")
+                    .setColor(0x3498DB)
+                    .setDescription("**Description:** Restore text capability arrays to muted targets.\n**Cooldown:** 3 seconds\n**Usage:**\n`?unmute [user]`\n\n**Example:**\n`?unmute @NoobLance`")
+                    .setTimestamp();
+                return message.channel.send({ embeds: [helpEmbed] });
             }
             await targetUser.timeout(null);
             return message.reply(`🔊 Communication channel array elements restored for **${targetUser.user.tag}**.`);
@@ -543,6 +580,13 @@ async function runVerificationProcess(interaction, usernameInput, targetUser) {
 
         try {
             const memberTarget = await interaction.guild.members.fetch(targetUser.id);
+            
+            // Remove unverified role if they have it
+            const activeUnverifiedId = data.unverifiedRoleId?.[interaction.guildId];
+            if (activeUnverifiedId && memberTarget.roles.cache.has(activeUnverifiedId)) {
+                await memberTarget.roles.remove(activeUnverifiedId).catch(() => {});
+            }
+
             const activeVerifiedRoleId = data.verifiedRoleId?.[interaction.guildId];
             if (activeVerifiedRoleId) {
                 const targetRoleObj = interaction.guild.roles.cache.get(activeVerifiedRoleId);
@@ -637,7 +681,6 @@ async function runUpdateProcess(interaction, targetUser) {
             }
         }
 
-        // EXACT REPLICA OF THE UPLOADED SYNC EMBED SCREENSHOT 
         const embed = new EmbedBuilder()
             .setTitle("Clone Trooper Profile Synced")
             .setColor(0x2ECC71) 
@@ -707,7 +750,20 @@ client.on('interactionCreate', async interaction => {
         data.verifiedRoleId[guildId] = targetRole.id;
         saveData();
 
-        return interaction.editReply(`✅ **Verified Role Saved:** The bot will now automatically hand out <@&${targetRole.id}> right when users complete verification.`);
+        return interaction.editReply(`✅ **Verified Role Saved:** Bot will automatically assign <@&${targetRole.id}> upon profile verification.`);
+    }
+
+    if (commandName === 'setup-unverified-role') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        await interaction.deferReply();
+        
+        const targetRole = options.getRole('role');
+        if (!data.unverifiedRoleId) data.unverifiedRoleId = {};
+        
+        data.unverifiedRoleId[guildId] = targetRole.id;
+        saveData();
+
+        return interaction.editReply(`✅ **Unverified Role Saved:** Incoming new users will automatically be granted <@&${targetRole.id}> upon joining until verified.`);
     }
 
     if (commandName === 'setup-logs') {
