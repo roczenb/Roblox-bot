@@ -32,7 +32,7 @@ const client = new Client({
 const DB_FILE = '/app/data/bot_data.json';
 let data = { 
     users: {}, 
-    groups: {},             // Deprecated in favor of storing group contexts per bind/milestone
+    groups: {},             
     binds: {}, 
     antimention: {}, 
     protectedTargets: {},
@@ -40,9 +40,10 @@ let data = {
     logs: {},
     security: {},
     autoroles: {}, 
-    milestoneRoles: {},     // Updated to map via group ID strings
-    milestoneThresholds: {},// Updated to map via group ID strings
+    milestoneRoles: {},     
+    milestoneThresholds: {},
     logsChannels: { system: null, moderator: null, movement: null },
+    verifiedRoleId: {}, // Stores the customizable verified role per server
     ticketCounter: {}
 };
 
@@ -72,6 +73,7 @@ function loadData() {
             if (!data.milestoneRoles) data.milestoneRoles = {};
             if (!data.milestoneThresholds) data.milestoneThresholds = {};
             if (!data.logsChannels) data.logsChannels = { system: null, moderator: null, movement: null };
+            if (!data.verifiedRoleId) data.verifiedRoleId = {};
             if (!data.ticketCounter) data.ticketCounter = {};
         }
     } catch (e) { console.log("Data loaded smoothly."); }
@@ -139,6 +141,9 @@ const commands = [
             ))
         .addChannelOption(o => o.setName('channel').setDescription('Target stream destination channel text frame').setRequired(true)),
 
+    new SlashCommandBuilder().setName('setup-verified-role').setDescription('Admin Only: Set the role automatically awarded upon successful verification')
+        .addRoleOption(o => o.setName('role').setDescription('The Discord role to assign').setRequired(true)),
+
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
     new SlashCommandBuilder().setName('updateall').setDescription('Lead Command Only: Update every verified member in the server at once'),
     new SlashCommandBuilder().setName('verification-panel').setDescription('Admin Only: Post the interactive verification embed panel with buttons'),
@@ -190,7 +195,7 @@ client.once('ready', async () => {
         for (const [guildId] of guilds) {
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
         }
-        console.log('Multi-group binding slash configurations online!');
+        console.log('Bot fully armed and setup with customizable verification role options!');
     } catch (e) { console.error(e); }
 });
 
@@ -434,6 +439,20 @@ async function runVerificationProcess(interaction, usernameInput, targetUser) {
         data.users[targetUser.id] = rId;
         saveData();
 
+        // AUTOMATIC CUSTOM VERIFIED ROLE ASSIGNMENT
+        try {
+            const memberTarget = await interaction.guild.members.fetch(targetUser.id);
+            const activeVerifiedRoleId = data.verifiedRoleId?.[interaction.guildId];
+            if (activeVerifiedRoleId) {
+                const targetRoleObj = interaction.guild.roles.cache.get(activeVerifiedRoleId);
+                if (targetRoleObj) {
+                    await memberTarget.roles.add(targetRoleObj).catch(() => {});
+                }
+            }
+        } catch (roleErr) {
+            console.error("Failed executing automated role attachment routing pipeline:", roleErr.message);
+        }
+
         const logEmbed = new EmbedBuilder()
             .setTitle("🔑 Account Verified")
             .setColor(0x3498DB)
@@ -447,7 +466,6 @@ async function runVerificationProcess(interaction, usernameInput, targetUser) {
     } catch (e) { return interaction.editReply(`❌ Error: ${e.message}`); }
 }
 
-// MULTI-GROUP RUN UPDATE EVALUATION PIPELINE
 async function runUpdateProcess(interaction, targetUser) {
     const robloxId = data.users[targetUser.id];
     if (!robloxId) return interaction.editReply("❌ Connect identity profile details using `/verify` first.");
@@ -460,14 +478,12 @@ async function runUpdateProcess(interaction, targetUser) {
         let added = [], removed = [];
         const targetMember = await interaction.guild.members.fetch(targetUser.id);
         
-        // Fetch all active group alignments the user belongs to on Roblox
         const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
-        const userGroupsCache = gRes.data.data; // Array of items: { group: { id }, role: { rank } }
+        const userGroupsCache = gRes.data.data; 
 
         const uLookup = await axios.get(`https://users.roproxy.com/v1/users/${robloxId}`);
         const robloxName = uLookup.data.name;
 
-        // Process standard single binds against their respective saved Group IDs
         for (const b of serverBinds) {
             const role = interaction.guild.roles.cache.get(b.roleId);
             if (role) {
@@ -478,7 +494,6 @@ async function runUpdateProcess(interaction, targetUser) {
                     if (!targetMember.roles.cache.has(role.id)) { await targetMember.roles.add(role); added.push(role.name); }
                     await applyUserRankMutations(targetMember, robloxId, b, robloxName);
                 } else if (targetMember.roles.cache.has(role.id)) { 
-                    // Verify no other bind configured for another group is keeping this role active
                     const safetyDuplicateCheck = serverBinds.some(otherB => {
                         if (otherB.roleId !== b.roleId) return false;
                         const altMatch = userGroupsCache.find(g => g.group.id.toString() === otherB.groupId.toString());
@@ -492,12 +507,10 @@ async function runUpdateProcess(interaction, targetUser) {
             }
         }
 
-        // Process cumulative milestones across their respective designated Group IDs
         const sRolesMap = data.milestoneRoles[interaction.guildId] || {};
         const sThresholds = data.milestoneThresholds[interaction.guildId] || {};
 
         for (const [poolKey, roleIdsArray] of Object.entries(sRolesMap)) {
-            // poolKey format now incorporates group info: "groupid_categoryname"
             const parsedMeta = poolKey.split('_');
             const targetGroupId = parsedMeta[0];
             
@@ -576,6 +589,20 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel } = interaction;
 
+    // CUSTOMIZABLE VERIFIED ROLE ALLOCATION SYSTEM SETUP COMMAND
+    if (commandName === 'setup-verified-role') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        await interaction.deferReply();
+        
+        const targetRole = options.getRole('role');
+        if (!data.verifiedRoleId) data.verifiedRoleId = {};
+        
+        data.verifiedRoleId[guildId] = targetRole.id;
+        saveData();
+
+        return interaction.editReply(`✅ **Verified Role Saved:** The bot will now automatically hand out <@&${targetRole.id}> right when users complete verification.`);
+    }
+
     if (commandName === 'setup-logs') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
@@ -614,7 +641,6 @@ client.on('interactionCreate', async interaction => {
         const minInvites = options.getInteger('min-invites') || 0;
 
         if (!data.binds[guildId]) data.binds[guildId] = [];
-        // Safely overlay duplicate binds specifically matching *this* group and rank combination
         data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === groupId && b.rankId === rankId));
         
         data.binds[guildId].push({ groupId, rankId, roleId: role.id, nicknameFormat, minInvites });
@@ -654,8 +680,6 @@ client.on('interactionCreate', async interaction => {
         const parsedIds = [...rolesListString.matchAll(/\d+/g)].map(match => match[0]);
 
         if (!parsedIds.length) return interaction.editReply("❌ No valid Discord roles extracted.");
-        
-        // Unique tracking token incorporating group structure
         const storagePoolKey = `${targetGroupId}_${categoryName}`;
 
         if (!data.milestoneRoles) data.milestoneRoles = {};
