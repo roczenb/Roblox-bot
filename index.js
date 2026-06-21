@@ -36,7 +36,9 @@ let data = {
     protectedTargets: {},
     invites: {}, 
     logs: {},
-    security: {} 
+    security: {},
+    autoroles: {},
+    thresholdRoles: {} // Persistent memory for the dynamic extra threshold roles
 };
 
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
@@ -52,11 +54,16 @@ function loadData() {
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
         if (fs.existsSync(DB_FILE)) {
             data = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+            if (!data.users) data.users = {};
+            if (!data.groups) data.groups = {};
+            if (!data.binds) data.binds = {};
             if (!data.antimention) data.antimention = {};
             if (!data.protectedTargets) data.protectedTargets = {};
             if (!data.invites) data.invites = {};
             if (!data.logs) data.logs = {};
             if (!data.security) data.security = {};
+            if (!data.autoroles) data.autoroles = {};
+            if (!data.thresholdRoles) data.thresholdRoles = {};
         }
     } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
@@ -94,6 +101,12 @@ const commands = [
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
     new SlashCommandBuilder().setName('updateall').setDescription('Lead Command Only: Update every verified member in the server at once'),
     new SlashCommandBuilder().setName('verification-panel').setDescription('Admin Only: Post the interactive verification embed panel with buttons'),
+    new SlashCommandBuilder().setName('autorole').setDescription('Admin Only: Configure a role given to all members instantly upon joining')
+        .addRoleOption(o => o.setName('role').setDescription('The role to auto-assign on join').setRequired(false)),
+    new SlashCommandBuilder().setName('threshold-role').setDescription('Admin Only: Set a companion role awarded to anyone at or above a specific Roblox rank')
+        .addIntegerOption(o => o.setName('rank-threshold').setDescription('Roblox Rank number threshold (e.g. 50)').setRequired(false))
+        .addRoleOption(o => o.setName('role').setDescription('The companion role to grant').setRequired(false))
+        .addBooleanOption(o => o.setName('remove').setDescription('Set to true to completely remove this threshold configuration').setRequired(false)),
     new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle shield settings')
         .addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
         .addUserOption(o => o.setName('protect-user').setDescription('Nuke messages that mention this specific user').setRequired(false))
@@ -160,6 +173,14 @@ client.on('guildMemberAdd', async member => {
         } catch (e) { console.error(e); }
     }
 
+    const activeAutoRoleId = data.autoroles?.[member.guild.id];
+    if (activeAutoRoleId) {
+        const targetJoinRole = member.guild.roles.cache.get(activeAutoRoleId);
+        if (targetJoinRole) {
+            await member.roles.add(targetJoinRole).catch(err => console.log("Auto-assignment execution block:", err.message));
+        }
+    }
+
     const cachedInvites = guildInvitesCache.get(member.guild.id);
     const newInvites = await member.guild.invites.fetch().catch(() => null);
     
@@ -222,7 +243,6 @@ function incrementSecurityTrigger(guildId) {
 client.on('channelDelete', channel => { if (channel.guild) incrementSecurityTrigger(channel.guild.id); });
 client.on('roleDelete', role => { if (role.guild) incrementSecurityTrigger(role.guild.id); });
 
-// --- AUTOMATED CHAT MONITORING ENGINE ---
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
@@ -231,7 +251,6 @@ client.on('messageCreate', async message => {
         return message.channel.send(`⚙️ **[SYSTEM OPERATION EXECUTION]**: Target confirmation sequence acknowledged. Preparing data packets...`);
     }
 
-    // --- ANTI-MENTION PROTECTION LAYER WITH REPLY HOOK EXEMPTION ---
     const isEnabled = data.antimention ? data.antimention[message.guild.id] : false;
     if (!isEnabled) return;
 
@@ -305,6 +324,15 @@ async function runUpdateProcess(interaction, targetUser) {
         const uLookup = await axios.get(`https://users.roproxy.com/v1/users/${robloxId}`);
         const robloxName = uLookup.data.name;
         
+        // Dynamic Threshold Configuration Fetching
+        const thresholdConfig = data.thresholdRoles?.[interaction.guildId];
+        let qualifiesForExtra = false;
+        let extraRole = null;
+
+        if (thresholdConfig && thresholdConfig.roleId) {
+            extraRole = interaction.guild.roles.cache.get(thresholdConfig.roleId);
+        }
+
         for (const b of serverBinds) {
             const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
             const rank = match ? match.role.rank : 0;
@@ -320,8 +348,26 @@ async function runUpdateProcess(interaction, targetUser) {
                 } else if (targetMember.roles.cache.has(role.id)) { 
                     await targetMember.roles.remove(role); 
                 }
+
+                if (match && thresholdConfig && rank >= thresholdConfig.rankThreshold) {
+                    qualifiesForExtra = true;
+                }
             }
         }
+
+        if (extraRole) {
+            if (qualifiesForExtra) {
+                if (!targetMember.roles.cache.has(extraRole.id)) {
+                    await targetMember.roles.add(extraRole);
+                    added.push(extraRole.name);
+                }
+            } else {
+                if (targetMember.roles.cache.has(extraRole.id)) {
+                    await targetMember.roles.remove(extraRole);
+                }
+            }
+        }
+
         const embed = new EmbedBuilder()
             .setTitle("Update Complete")
             .setColor(0x2ECC71) 
@@ -337,7 +383,59 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel, guild } = interaction;
 
-    // --- BIND COMMAND HANDLERS ---
+    if (commandName === 'autorole') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        }
+        await interaction.deferReply();
+        const selectedRole = options.getRole('role');
+
+        if (!selectedRole) {
+            const cachedId = data.autoroles?.[guildId];
+            if (!cachedId) return interaction.editReply("ℹ️ No autorole configuration active on this server yet.");
+            return interaction.editReply(`ℹ️ Users currently receive role: <@&${cachedId}> upon entry point connection.`);
+        }
+
+        if (!data.autoroles) data.autoroles = {};
+        data.autoroles[guildId] = selectedRole.id;
+        saveData();
+        return interaction.editReply(`✅ **Autorole Saved:** All users joining the server will now instantly be granted <@&${selectedRole.id}>.`);
+    }
+
+    // --- NEW THRESHOLD-ROLE SLASH COMMAND HANDLER ---
+    if (commandName === 'threshold-role') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        }
+        await interaction.deferReply();
+
+        const rankThreshold = options.getInteger('rank-threshold');
+        const targetRole = options.getRole('role');
+        const shouldRemove = options.getBoolean('remove');
+
+        if (!data.thresholdRoles) data.thresholdRoles = {};
+
+        if (shouldRemove) {
+            delete data.thresholdRoles[guildId];
+            saveData();
+            return interaction.editReply("✅ Companion threshold role configuration has been completely deleted.");
+        }
+
+        if (!rankThreshold || !targetRole) {
+            const currentConfig = data.thresholdRoles[guildId];
+            if (!currentConfig) return interaction.editReply("ℹ️ No threshold companion roles are configured on this server.");
+            return interaction.editReply(`ℹ️ **Current Setup:** Members with a Roblox rank of **${currentConfig.rankThreshold}+** will receive <@&${currentConfig.roleId}>.`);
+        }
+
+        data.thresholdRoles[guildId] = {
+            rankThreshold: rankThreshold,
+            roleId: targetRole.id
+        };
+        saveData();
+
+        return interaction.editReply(`✅ **Threshold Role Bound:** Users with group ranks **${rankThreshold}+** will now receive companion role <@&${targetRole.id}> whenever updated.`);
+    }
+
     if (commandName === 'bind') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
@@ -355,23 +453,13 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (!data.binds[guildId]) data.binds[guildId] = [];
-        
-        // Remove existing bind for this rank
         data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === groupId && b.rankId === rankId));
         
-        data.binds[guildId].push({
-            groupId,
-            rankId,
-            roleId: role.id,
-            nicknameFormat,
-            minInvites
-        });
-        
+        data.binds[guildId].push({ groupId, rankId, roleId: role.id, nicknameFormat, minInvites });
         saveData();
         return interaction.editReply(`✅ Successfully linked **Rank ${rankId}** directly to role <@&${role.id}>.`);
     }
 
-    // --- ANTI-MENTION PROTECTION LAYER HANDLERS ---
     if (commandName === 'antimention') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
@@ -411,7 +499,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply("✅ Anti-mention constraints wiped clean.");
     }
 
-    // --- REBUILT DEFERRED GENERAL/ADMIN SYSTEMS ---
     if (commandName === 'security-config') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
@@ -499,7 +586,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply("Deployed.");
     }
 
-    // --- IMMUTABLE QUICK-REPLY API DEFERRALS ---
     if (commandName === 'verify') {
         const wait = checkCooldown(interaction.user.id, commandName, 5);
         if (wait) return interaction.reply({ content: `⏳ Cooldown active: ${wait}s`, flags: [MessageFlags.Ephemeral] });
@@ -583,7 +669,6 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply({ embeds: [leaderboardEmbed] });
     }
 
-    // --- PLACEHOLDER HANDLERS TO PREVENT TIMEOUT ERRORS ---
     if (commandName === 'giveaway') {
         return interaction.reply({ content: "🎉 Giveaway system processing backend configurations...", flags: [MessageFlags.Ephemeral] });
     }
