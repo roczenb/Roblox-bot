@@ -364,15 +364,20 @@ async function runUpdateProcess(interaction, targetUser) {
         const sRolesMap = data.milestoneRoles[interaction.guildId] || {};
         const sThresholds = data.milestoneThresholds[interaction.guildId] || {};
 
+        // Lock primary group precisely to prevent spoofing or shifting display values
         const primaryGroupId = data.groups?.[interaction.guildId];
-        const primaryMatch = gRes.data.data.find(g => g.group.id.toString() === primaryGroupId);
+        if (!primaryGroupId) {
+            return interaction.editReply("❌ Primary group configuration missing. Please run `/setup-group` to assign a valid group ID.");
+        }
+        
+        const primaryMatch = gRes.data.data.find(g => g.group.id.toString() === primaryGroupId.toString());
         const mainGroupRank = primaryMatch ? primaryMatch.role.rank : 0;
 
         // --- Standard 1-to-1 individual binds ---
         for (const b of serverBinds) {
             const role = interaction.guild.roles.cache.get(b.roleId);
             if (role) {
-                const currentBindGroupMatch = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
+                const currentBindGroupMatch = gRes.data.data.find(g => g.group.id.toString() === b.groupId.toString());
                 const specificUserRank = currentBindGroupMatch ? currentBindGroupMatch.role.rank : 0;
 
                 if (specificUserRank === b.rankId && netInvites >= (b.minInvites || 0)) { 
@@ -683,7 +688,6 @@ client.on('interactionCreate', async interaction => {
 
         const targetUser = options.getUser('target') || interaction.user;
 
-        // Security Lock: Block non-admins from changing other users
         if (targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.editReply("❌ You do not have permission to verify other members.");
         }
@@ -737,7 +741,6 @@ client.on('interactionCreate', async interaction => {
         await interaction.deferReply();
         const targetUser = options.getUser('user') || interaction.user;
 
-        // Security Lock: Block non-admins from manually running updates on other users
         if (targetUser.id !== interaction.user.id && !member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.editReply("❌ You do not have permission to force rank updates on other members.");
         }
