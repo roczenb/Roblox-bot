@@ -38,7 +38,8 @@ let data = {
     logs: {},
     security: {},
     autoroles: {},
-    thresholdRoles: {} // Persistent memory for the dynamic extra threshold roles
+    milestoneRoles: {}, // Stores arrays of role IDs per threshold configuration mapping
+    milestoneThresholds: {} 
 };
 
 const LC_ROLE_NAME = "~{}~ Lead Command ~{}~"; 
@@ -63,7 +64,8 @@ function loadData() {
             if (!data.logs) data.logs = {};
             if (!data.security) data.security = {};
             if (!data.autoroles) data.autoroles = {};
-            if (!data.thresholdRoles) data.thresholdRoles = {};
+            if (!data.milestoneRoles) data.milestoneRoles = {};
+            if (!data.milestoneThresholds) data.milestoneThresholds = {};
         }
     } catch (e) { console.log("Local Volume DB initialization setup."); }
 }
@@ -98,15 +100,16 @@ const commands = [
         .addStringOption(o => o.setName('nickname-format').setDescription('Format, e.g: E1 | {roblox_username}').setRequired(false))
         .addIntegerOption(o => o.setName('min-invites').setDescription('Minimum required invites').setRequired(false)),
     new SlashCommandBuilder().setName('update').setDescription('Sync ranks in this server').addUserOption(o => o.setName('user').setDescription('Admin Only: Target user to update').setRequired(false)),
+    new SlashCommandBuilder().setName('sync-milestones').setDescription('Admin Only: Force re-verify and evaluate batch division rules for a member').addUserOption(o => o.setName('target').setDescription('The trooper to sync tier roles for').setRequired(true)),
+    new SlashCommandBuilder().setName('setup-milestones').setDescription('Admin Only: Configure multiple roles awarded to anyone AT or ABOVE a certain Roblox rank')
+        .addStringOption(o => o.setName('category-name').setDescription('Label for this threshold pool (e.g. Officer Pack)').setRequired(true))
+        .addStringOption(o => o.setName('roles-list').setDescription('Comma separated list of multiple roles (e.g. @Role1, @Role2, @Role3)').setRequired(true))
+        .addIntegerOption(o => o.setName('min-rank').setDescription('The minimum Roblox rank number required (e.g. 30)').setRequired(true)),
     new SlashCommandBuilder().setName('view-binds').setDescription('View all Roblox rank-to-role connections for this server'),
     new SlashCommandBuilder().setName('updateall').setDescription('Lead Command Only: Update every verified member in the server at once'),
     new SlashCommandBuilder().setName('verification-panel').setDescription('Admin Only: Post the interactive verification embed panel with buttons'),
     new SlashCommandBuilder().setName('autorole').setDescription('Admin Only: Configure a role given to all members instantly upon joining')
         .addRoleOption(o => o.setName('role').setDescription('The role to auto-assign on join').setRequired(false)),
-    new SlashCommandBuilder().setName('threshold-role').setDescription('Admin Only: Set a companion role awarded to anyone at or above a specific Roblox rank')
-        .addIntegerOption(o => o.setName('rank-threshold').setDescription('Roblox Rank number threshold (e.g. 50)').setRequired(false))
-        .addRoleOption(o => o.setName('role').setDescription('The companion role to grant').setRequired(false))
-        .addBooleanOption(o => o.setName('remove').setDescription('Set to true to completely remove this threshold configuration').setRequired(false)),
     new SlashCommandBuilder().setName('antimention').setDescription('Admin Only: Toggle shield settings')
         .addBooleanOption(o => o.setName('enabled').setDescription('Turn anti-mention filter on or off').setRequired(true))
         .addUserOption(o => o.setName('protect-user').setDescription('Nuke messages that mention this specific user').setRequired(false))
@@ -324,22 +327,18 @@ async function runUpdateProcess(interaction, targetUser) {
         const uLookup = await axios.get(`https://users.roproxy.com/v1/users/${robloxId}`);
         const robloxName = uLookup.data.name;
         
-        // Dynamic Threshold Configuration Fetching
-        const thresholdConfig = data.thresholdRoles?.[interaction.guildId];
-        let qualifiesForExtra = false;
-        let extraRole = null;
+        const sRolesMap = data.milestoneRoles[interaction.guildId] || {};
+        const sThresholds = data.milestoneThresholds[interaction.guildId] || {};
 
-        if (thresholdConfig && thresholdConfig.roleId) {
-            extraRole = interaction.guild.roles.cache.get(thresholdConfig.roleId);
-        }
+        const groupBind = serverBinds[0]; 
+        const match = gRes.data.data.find(g => g.group.id.toString() === groupBind?.groupId);
+        const userRank = match ? match.role.rank : 0;
 
+        // --- Standard 1-to-1 individual binds ---
         for (const b of serverBinds) {
-            const match = gRes.data.data.find(g => g.group.id.toString() === b.groupId);
-            const rank = match ? match.role.rank : 0;
             const role = interaction.guild.roles.cache.get(b.roleId);
-            
             if (role) {
-                if (rank === b.rankId && netInvites >= (b.minInvites || 0)) { 
+                if (userRank === b.rankId && netInvites >= (b.minInvites || 0)) { 
                     if (!targetMember.roles.cache.has(role.id)) {
                         await targetMember.roles.add(role); 
                         added.push(role.name); 
@@ -348,38 +347,56 @@ async function runUpdateProcess(interaction, targetUser) {
                 } else if (targetMember.roles.cache.has(role.id)) { 
                     await targetMember.roles.remove(role); 
                 }
-
-                if (match && thresholdConfig && rank >= thresholdConfig.rankThreshold) {
-                    qualifiesForExtra = true;
-                }
             }
         }
 
-        if (extraRole) {
-            if (qualifiesForExtra) {
-                if (!targetMember.roles.cache.has(extraRole.id)) {
-                    await targetMember.roles.add(extraRole);
-                    added.push(extraRole.name);
-                }
-            } else {
-                if (targetMember.roles.cache.has(extraRole.id)) {
-                    await targetMember.roles.remove(extraRole);
+        // --- Multi-role threshold iteration ---
+        for (const [categoryKey, roleIdsArray] of Object.entries(sRolesMap)) {
+            const minRequiredRank = sThresholds[categoryKey] ?? 0;
+            const qualifies = userRank >= minRequiredRank;
+
+            if (Array.isArray(roleIdsArray)) {
+                for (const rId of roleIdsArray) {
+                    const discordRole = interaction.guild.roles.cache.get(rId);
+                    if (!discordRole) continue;
+
+                    const hasRole = targetMember.roles.cache.has(rId);
+                    if (qualifies && !hasRole) {
+                        await targetMember.roles.add(discordRole).catch(() => {});
+                        added.push(discordRole.name);
+                    } else if (!qualifies && hasRole) {
+                        await targetMember.roles.remove(discordRole).catch(() => {});
+                    }
                 }
             }
         }
 
         const embed = new EmbedBuilder()
-            .setTitle("Update Complete")
+            .setTitle("Clone Trooper Profile Synced")
             .setColor(0x2ECC71) 
             .addFields(
-                { name: "User:", value: `<@${targetUser.id}>`, inline: false },
-                { name: "Roles Added", value: added.length > 0 ? added.join('\n') : "No new ranks to add.", inline: false }
+                { name: "Trooper:", value: `<@${targetUser.id}>`, inline: true },
+                { name: "Roblox Rank ID:", value: `\`${userRank}\``, inline: true },
+                { name: "Updates Processed:", value: added.length > 0 ? added.join('\n') : "No changes applied.", inline: false }
             );
         return interaction.editReply({ embeds: [embed] });
-    } catch (e) { return interaction.editReply("❌ Update network error."); }
+    } catch (e) { 
+        console.error(e);
+        return interaction.editReply("❌ Update network error processing thresholds."); 
+    }
 }
 
 client.on('interactionCreate', async interaction => {
+    if (interaction.isButton()) {
+        if (interaction.customId === 'panel_update_btn') {
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+            return await runUpdateProcess(interaction, interaction.user);
+        }
+        if (interaction.customId === 'panel_link_btn') {
+            return interaction.reply({ content: "Please execute the `/verify` command to securely register your identity.", flags: [MessageFlags.Ephemeral] });
+        }
+    }
+
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel, guild } = interaction;
 
@@ -402,38 +419,42 @@ client.on('interactionCreate', async interaction => {
         return interaction.editReply(`✅ **Autorole Saved:** All users joining the server will now instantly be granted <@&${selectedRole.id}>.`);
     }
 
-    // --- NEW THRESHOLD-ROLE SLASH COMMAND HANDLER ---
-    if (commandName === 'threshold-role') {
+    if (commandName === 'sync-milestones') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
+            return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        }
+        await interaction.deferReply();
+        const targetTrooper = options.getUser('target');
+        return await runUpdateProcess(interaction, targetTrooper);
+    }
+
+    if (commandName === 'setup-milestones') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
             return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         }
         await interaction.deferReply();
 
-        const rankThreshold = options.getInteger('rank-threshold');
-        const targetRole = options.getRole('role');
-        const shouldRemove = options.getBoolean('remove');
+        const categoryName = options.getString('category-name').toLowerCase().replace(/\s+/g, '_');
+        const rolesListString = options.getString('roles-list');
+        const minRank = options.getInteger('min-rank');
 
-        if (!data.thresholdRoles) data.thresholdRoles = {};
+        // Regex parses out clean SNOWFLAKE IDs from raw text or mentions
+        const parsedIds = [...rolesListString.matchAll(/\d+/g)].map(match => match[0]);
 
-        if (shouldRemove) {
-            delete data.thresholdRoles[guildId];
-            saveData();
-            return interaction.editReply("✅ Companion threshold role configuration has been completely deleted.");
+        if (!parsedIds.length) {
+            return interaction.editReply("❌ No valid Discord roles could be found in your entry field text. Make sure to mention them or separate using commas.");
         }
 
-        if (!rankThreshold || !targetRole) {
-            const currentConfig = data.thresholdRoles[guildId];
-            if (!currentConfig) return interaction.editReply("ℹ️ No threshold companion roles are configured on this server.");
-            return interaction.editReply(`ℹ️ **Current Setup:** Members with a Roblox rank of **${currentConfig.rankThreshold}+** will receive <@&${currentConfig.roleId}>.`);
-        }
+        if (!data.milestoneRoles) data.milestoneRoles = {};
+        if (!data.milestoneThresholds) data.milestoneThresholds = {};
+        if (!data.milestoneRoles[guildId]) data.milestoneRoles[guildId] = {};
+        if (!data.milestoneThresholds[guildId]) data.milestoneThresholds[guildId] = {};
 
-        data.thresholdRoles[guildId] = {
-            rankThreshold: rankThreshold,
-            roleId: targetRole.id
-        };
+        data.milestoneRoles[guildId][categoryName] = parsedIds;
+        data.milestoneThresholds[guildId][categoryName] = minRank;
+
         saveData();
-
-        return interaction.editReply(`✅ **Threshold Role Bound:** Users with group ranks **${rankThreshold}+** will now receive companion role <@&${targetRole.id}> whenever updated.`);
+        return interaction.editReply(`✅ **Threshold Saved:** Anyone with Roblox Rank **${minRank}+** will receive all **${parsedIds.length}** configured roles mapped within pool key: \`${categoryName}\`.`);
     }
 
     if (commandName === 'bind') {
