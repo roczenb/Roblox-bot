@@ -148,11 +148,12 @@ client.once('ready', async () => {
     }
     try {
         const rest = new REST({ version: '10' }).setToken(process.env.BOT_TOKEN);
-        await rest.put(Routes.applicationCommands(client.user.id), { body: [] });
-        const guilds = await client.guilds.fetch();
-        for (const [guildId] of guilds) {
-            await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
-        }
+        console.log('Started refreshing application (global) / commands...');
+        
+        await rest.put(
+            Routes.applicationCommands(client.user.id),
+            { body: commands }
+        );
         console.log('All slash commands are synced globally!');
     } catch (e) { console.error('Command registration failed:', e); }
 });
@@ -277,7 +278,6 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
     const channel = getLogChannel(newMember.guild, 'joinLeave');
     if (!channel) return;
 
-    // 1. Check for Timeout Configuration Changes
     const oldTimeout = oldMember.communicationDisabledUntilTimestamp;
     const newTimeout = newMember.communicationDisabledUntilTimestamp;
 
@@ -305,7 +305,6 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
         }
     }
 
-    // 2. Check for Role Variations
     const addedRoles = newMember.roles.cache.filter(role => !oldMember.roles.cache.has(role.id));
     const removedRoles = oldMember.roles.cache.filter(role => !newMember.roles.cache.has(role.id));
 
