@@ -11,8 +11,7 @@ const {
     MessageFlags,
     PermissionFlagsBits,
     ChannelType,
-    MessageType,
-    AuditLogEvent
+    MessageType
 } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
@@ -41,13 +40,12 @@ let data = {
     logs: {},
     security: {},
     autoroles: {}, 
-    milestoneRoles: {},     
-    milestoneThresholds: {},
+    milestones: {},     
     logsChannels: { system: null, moderator: null, movement: null },
     verifiedRoleId: {}, 
     unverifiedRoleId: {},
     ticketCounter: {},
-    giveawayRole: {} // Guild ID -> Allowed Role ID mapping
+    giveawayRole: {}
 };
 
 const verificationCodes = new Map();
@@ -73,8 +71,7 @@ function loadData() {
             if (!data.logs) data.logs = {};
             if (!data.security) data.security = {};
             if (!data.autoroles) data.autoroles = {};
-            if (!data.milestoneRoles) data.milestoneRoles = {};
-            if (!data.milestoneThresholds) data.milestoneThresholds = {};
+            if (!data.milestones) data.milestones = {};
             if (!data.logsChannels) data.logsChannels = { system: null, moderator: null, movement: null };
             if (!data.verifiedRoleId) data.verifiedRoleId = {};
             if (!data.unverifiedRoleId) data.unverifiedRoleId = {};
@@ -131,11 +128,17 @@ const commands = [
     new SlashCommandBuilder().setName('update').setDescription('Sync ranks in this server').addUserOption(o => o.setName('user').setDescription('Admin Only: Target user to update').setRequired(false)),
     new SlashCommandBuilder().setName('sync-milestones').setDescription('Admin Only: Force tier updates').addUserOption(o => o.setName('target').setDescription('The trooper to sync tier roles for').setRequired(true)),
     
-    new SlashCommandBuilder().setName('setup-milestones').setDescription('Admin Only: Configure roles awarded at/above a Roblox rank')
+    new SlashCommandBuilder().setName('setup-milestones').setDescription('Admin Only: Configure roles awarded within a Roblox rank range')
         .addStringOption(o => o.setName('groupid').setDescription('Roblox Group ID to evaluate against').setRequired(true))
-        .addStringOption(o => o.setName('category-name').setDescription('Label for this pool (e.g. Officer Pack)').setRequired(true))
+        .addStringOption(o => o.setName('category-name').setDescription('Unique label for this pool (e.g. Officer Pack)').setRequired(true))
         .addStringOption(o => o.setName('roles-list').setDescription('Comma separated list of multiple roles (e.g. @Role1, @Role2)').setRequired(true))
-        .addIntegerOption(o => o.setName('min-rank').setDescription('The minimum Roblox rank number required').setRequired(true)),
+        .addIntegerOption(o => o.setName('min-rank').setDescription('The minimum Roblox rank number required').setRequired(true))
+        .addIntegerOption(o => o.setName('max-rank').setDescription('The maximum Roblox rank number allowed (Optional)').setRequired(false)),
+        
+    new SlashCommandBuilder().setName('view-milestones').setDescription('View all active milestone pool structures for this server'),
+    
+    new SlashCommandBuilder().setName('remove-milestone').setDescription('Admin Only: Delete a specific milestone configuration pool')
+        .addStringOption(o => o.setName('category-name').setDescription('The precise label of the milestone pool to wipe').setRequired(true)),
     
     new SlashCommandBuilder().setName('setup-logs').setDescription('Admin Only: Route logs to independent tracking stations')
         .addStringOption(o => o.setName('category').setDescription('Select targeting track pipeline category').setRequired(true)
@@ -211,7 +214,7 @@ client.once('ready', async () => {
         for (const [guildId] of guilds) {
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
         }
-        console.log('Bot fully loaded with dynamic text prefix commands and slash functionality.');
+        console.log('Bot fully loaded with dynamic structures.');
     } catch (e) { console.error(e); }
 });
 
@@ -408,13 +411,12 @@ client.on('messageCreate', async message => {
                 .setTitle("Moderator Commands")
                 .setDescription(`Custom modules running active across server networks.\nPrefix: \`?\``)
                 .addFields(
-                    { name: "⚙️ ?purge `[count]`", value: "Delete packages of text logs up to a 100 record limitation buffer.", inline: false },
-                    { name: "🔨 ?ban `[user/ID]` `(reason)`", value: "Permanently restrict and ban malicious endpoints from access networks.", inline: false },
-                    { name: "👢 ?kick `[user/ID]` `(reason)`", value: "Forcibly eject a targeted profile link connection from the guild matrix.", inline: false },
-                    { name: "⏳ ?timeout `[user/ID]` `[minutes]`", value: "Apply a text silencer and restrict message creation variables completely.", inline: false },
-                    { name: "🔊 ?unmute `[user/ID]`", value: "Lift isolation and manually restore text communication capability metrics.", inline: false }
+                    { name: "⚙️ ?purge `[count]`", value: "Delete packages of text logs.", inline: false },
+                    { name: "🔨 ?ban `[user/ID]` `(reason)`", value: "Permanently restrict and ban malicious endpoints.", inline: false },
+                    { name: "👢 ?kick `[user/ID]` `(reason)`", value: "Forcibly eject a targeted profile link.", inline: false },
+                    { name: "⏳ ?timeout `[user/ID]` `[minutes]`", value: "Apply a text silencer variables completely.", inline: false },
+                    { name: "🔊 ?unmute `[user/ID]`", value: "Lift isolation and manually restore communication metrics.", inline: false }
                 )
-                .setFooter({ text: `${message.guild.name} • Page 1 of 1`, iconURL: message.guild.iconURL() })
                 .setTimestamp();
 
             return message.channel.send({ embeds: [dynoHelpMenuEmbed] });
@@ -424,18 +426,13 @@ client.on('messageCreate', async message => {
             if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) return;
             const count = parseInt(structuralArgs[0]);
             if (!count || isNaN(count) || count < 1 || count > 100) {
-                const helpEmbed = new EmbedBuilder()
-                    .setTitle("Command: ?purge")
-                    .setColor(0x3498DB)
-                    .setDescription("**Description:** Delete patches of text logs in bulk.\n**Cooldown:** 3 seconds\n**Usage:**\n`?purge [count]`\n\n**Example:**\n`?purge 50`")
-                    .setTimestamp();
-                return message.channel.send({ embeds: [helpEmbed] });
+                return;
             }
             await message.delete().catch(() => {});
             const cleared = await message.channel.bulkDelete(count, true).catch(() => []);
-            const logEmbed = new EmbedBuilder().setTitle("🧹 Channel Purged").setColor(0x95A5A6).setDescription(`Cleared \`${cleared.size || cleared}\` records via text command format.`).setTimestamp();
+            const logEmbed = new EmbedBuilder().setTitle("🧹 Channel Purged").setColor(0x95A5A6).setDescription(`Cleared \`${cleared.size || cleared}\` records.`).setTimestamp();
             dispatchLog(message.guild.id, 'system', { embeds: [logEmbed] });
-            const feedback = await message.channel.send(`✅ Success: Cleared \`${cleared.size || cleared}\` messages context parameters.`);
+            const feedback = await message.channel.send(`✅ Success: Cleared \`${cleared.size || cleared}\` messages.`);
             return setTimeout(() => feedback.delete().catch(() => {}), 4000);
         }
 
@@ -448,30 +445,16 @@ client.on('messageCreate', async message => {
         if (invokerTarget === 'ban') {
             if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
-            if (!targetUser) {
-                const helpEmbed = new EmbedBuilder()
-                    .setTitle("Command: ?ban")
-                    .setColor(0x3498DB)
-                    .setDescription("**Description:** Permanently ban a member from the network matrix.\n**Cooldown:** 3 seconds\n**Usage:**\n`?ban [user] [reason]`\n\n**Example:**\n`?ban @NoobLance Terminated.`")
-                    .setTimestamp();
-                return message.channel.send({ embeds: [helpEmbed] });
-            }
+            if (!targetUser) return;
             const reason = structuralArgs.slice(1).join(" ") || "No reason specified.";
             await targetUser.ban({ reason: reason });
-            return message.reply(`🔨 **${targetUser.user.tag}** has been banned from the server grid matrix.`);
+            return message.reply(`🔨 **${targetUser.user.tag}** has been banned.`);
         }
 
         if (invokerTarget === 'kick') {
             if (!message.member.permissions.has(PermissionFlagsBits.KickMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
-            if (!targetUser) {
-                const helpEmbed = new EmbedBuilder()
-                    .setTitle("Command: ?kick")
-                    .setColor(0x3498DB)
-                    .setDescription("**Description:** Kick a member from the server.\n**Cooldown:** 3 seconds\n**Usage:**\n`?kick [user] [reason]`\n\n**Example:**\n`?kick @NoobLance Get out!`")
-                    .setTimestamp();
-                return message.channel.send({ embeds: [helpEmbed] });
-            }
+            if (!targetUser) return;
             const reason = structuralArgs.slice(1).join(" ") || "No reason specified.";
             await targetUser.kick(reason);
             return message.reply(`👢 **${targetUser.user.tag}** was forcibly expelled.`);
@@ -481,33 +464,18 @@ client.on('messageCreate', async message => {
             if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
             const dynamicMinutes = parseInt(structuralArgs[1]);
-
-            if (!targetUser || isNaN(dynamicMinutes) || dynamicMinutes <= 0) {
-                const helpEmbed = new EmbedBuilder()
-                    .setTitle("Command: ?timeout")
-                    .setColor(0x3498DB)
-                    .setDescription("**Description:** Put a member in temporary isolation.\n**Cooldown:** 3 seconds\n**Usage:**\n`?timeout [user] [minutes]`\n\n**Example:**\n`?timeout @NoobLance 10`")
-                    .setTimestamp();
-                return message.channel.send({ embeds: [helpEmbed] });
-            }
+            if (!targetUser || isNaN(dynamicMinutes) || dynamicMinutes <= 0) return;
 
             await targetUser.timeout(dynamicMinutes * 60 * 1000);
-            return message.reply(`⏳ **${targetUser.user.tag}** isolated into isolation cells for ${dynamicMinutes} minutes.`);
+            return message.reply(`⏳ **${targetUser.user.tag}** isolated for ${dynamicMinutes} minutes.`);
         }
 
         if (invokerTarget === 'unmute') {
             if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
-            if (!targetUser) {
-                const helpEmbed = new EmbedBuilder()
-                    .setTitle("Command: ?unmute")
-                    .setColor(0x3498DB)
-                    .setDescription("**Description:** Restore text capability arrays to muted targets.\n**Cooldown:** 3 seconds\n**Usage:**\n`?unmute [user]`\n\n**Example:**\n`?unmute @NoobLance`")
-                    .setTimestamp();
-                return message.channel.send({ embeds: [helpEmbed] });
-            }
+            if (!targetUser) return;
             await targetUser.timeout(null);
-            return message.reply(`🔊 Communication channel array elements restored for **${targetUser.user.tag}**.`);
+            return message.reply(`🔊 Communication channel elements restored for **${targetUser.user.tag}**.`);
         }
     }
 
@@ -591,13 +559,9 @@ async function runVerificationProcess(interaction, usernameInput, targetUser) {
             const activeVerifiedRoleId = data.verifiedRoleId?.[interaction.guildId];
             if (activeVerifiedRoleId) {
                 const targetRoleObj = interaction.guild.roles.cache.get(activeVerifiedRoleId);
-                if (targetRoleObj) {
-                    await memberTarget.roles.add(targetRoleObj).catch(() => {});
-                }
+                if (targetRoleObj) await memberTarget.roles.add(targetRoleObj).catch(() => {});
             }
-        } catch (roleErr) {
-            console.error("Failed executing automated role attachment routing pipeline:", roleErr.message);
-        }
+        } catch (roleErr) { console.error(roleErr.message); }
 
         const logEmbed = new EmbedBuilder()
             .setTitle("🔑 Account Verified")
@@ -631,9 +595,7 @@ async function runUpdateProcess(interaction, targetUser) {
         const robloxName = uLookup.data.name;
 
         let primaryGroupRankId = 0;
-        if (userGroupsCache.length > 0) {
-            primaryGroupRankId = userGroupsCache[0].role.rank;
-        }
+        if (userGroupsCache.length > 0) primaryGroupRankId = userGroupsCache[0].role.rank;
 
         for (const b of serverBinds) {
             const role = interaction.guild.roles.cache.get(b.roleId);
@@ -658,21 +620,17 @@ async function runUpdateProcess(interaction, targetUser) {
             }
         }
 
-        const sRolesMap = data.milestoneRoles[interaction.guildId] || {};
-        const sThresholds = data.milestoneThresholds[interaction.guildId] || {};
-
-        for (const [poolKey, roleIdsArray] of Object.entries(sRolesMap)) {
-            const parsedMeta = poolKey.split('_');
-            const targetGroupId = parsedMeta[0];
-            
-            const targetedMatch = userGroupsCache.find(g => g.group.id.toString() === targetGroupId.toString());
+        const serverMilestones = data.milestones[interaction.guildId] || {};
+        for (const [categoryName, config] of Object.entries(serverMilestones)) {
+            const targetedMatch = userGroupsCache.find(g => g.group.id.toString() === config.groupId.toString());
             const evaluatedRank = targetedMatch ? targetedMatch.role.rank : 0;
 
-            const minRequiredRank = sThresholds[poolKey] ?? 0;
-            const qualifies = evaluatedRank >= minRequiredRank;
+            const minRequiredRank = config.minRank ?? 0;
+            const maxRequiredRank = config.maxRank ?? 255;
+            const qualifies = (evaluatedRank >= minRequiredRank && evaluatedRank <= maxRequiredRank);
 
-            if (Array.isArray(roleIdsArray)) {
-                for (const rId of roleIdsArray) {
+            if (Array.isArray(config.roles)) {
+                for (const rId of config.roles) {
                     const discordRole = interaction.guild.roles.cache.get(rId);
                     if (!discordRole) continue;
                     const hasRole = targetMember.roles.cache.has(rId);
@@ -709,18 +667,18 @@ client.on('interactionCreate', async interaction => {
             
             if (!global.activeGiveaways) global.activeGiveaways = new Map();
             const giveaway = global.activeGiveaways.get(interaction.message.id);
-            if (!giveaway) return interaction.editReply("❌ This giveaway has ended or is invalid.");
+            if (!giveaway) return interaction.editReply("❌ This giveaway has ended.");
             
             if (giveaway.participants.has(interaction.user.id)) {
                 giveaway.participants.delete(interaction.user.id);
                 interaction.message.embeds[0].fields[1].value = `\`${giveaway.participants.size}\``;
                 await interaction.message.edit({ embeds: [interaction.message.embeds[0]] });
-                return interaction.editReply("❌ Left the giveaway entry matrix.");
+                return interaction.editReply("❌ Left the giveaway entries.");
             } else {
                 giveaway.participants.add(interaction.user.id);
                 interaction.message.embeds[0].fields[1].value = `\`${giveaway.participants.size}\``;
                 await interaction.message.edit({ embeds: [interaction.message.embeds[0]] });
-                return interaction.editReply("🎉 Successfully entered the giveaway matrix pool!");
+                return interaction.editReply("🎉 Successfully entered the giveaway!");
             }
         }
 
@@ -751,7 +709,7 @@ client.on('interactionCreate', async interaction => {
         }
 
         if (interaction.customId === 'close_ticket_btn') {
-            await interaction.reply({ content: "🔒 Terminating and closing channel workspace track frame in 5 seconds..." });
+            await interaction.reply({ content: "🔒 Terminating and closing channel workspace track frame..." });
             dispatchLog(interaction.guildId, 'system', `🗑️ **Ticket Closed:** Workspace tracking window \`${interaction.channel.name}\` dropped.`);
             setTimeout(() => { interaction.channel.delete().catch(() => {}); }, 5000);
             return;
@@ -764,27 +722,19 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'setup-verified-role') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        
         const targetRole = options.getRole('role');
-        if (!data.verifiedRoleId) data.verifiedRoleId = {};
-        
         data.verifiedRoleId[guildId] = targetRole.id;
         saveData();
-
-        return interaction.editReply(`✅ **Verified Role Saved:** Bot will automatically assign <@&${targetRole.id}> upon profile verification.`);
+        return interaction.editReply(`✅ **Verified Role Saved:** Granted role <@&${targetRole.id}> smoothly.`);
     }
 
     if (commandName === 'setup-unverified-role') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
-        
         const targetRole = options.getRole('role');
-        if (!data.unverifiedRoleId) data.unverifiedRoleId = {};
-        
         data.unverifiedRoleId[guildId] = targetRole.id;
         saveData();
-
-        return interaction.editReply(`✅ **Unverified Role Saved:** Incoming new users will automatically be granted <@&${targetRole.id}> upon joining until verified.`);
+        return interaction.editReply(`✅ **Unverified Role Saved:** Granted role <@&${targetRole.id}> smoothly.`);
     }
 
     if (commandName === 'setup-logs') {
@@ -794,7 +744,6 @@ client.on('interactionCreate', async interaction => {
         const targetChannel = options.getChannel('channel');
 
         if (!targetChannel.isTextBased()) return interaction.editReply("❌ Target allocation selection must be text-based.");
-        if (!data.logsChannels) data.logsChannels = { system: null, moderator: null, movement: null };
         if (!data.logsChannels[categorySelection]) data.logsChannels[categorySelection] = {};
         
         data.logsChannels[categorySelection][guildId] = targetChannel.id;
@@ -806,7 +755,7 @@ client.on('interactionCreate', async interaction => {
         if (!member.permissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
         const targetAmount = options.getInteger('amount');
-        if (targetAmount < 1 || targetAmount > 100) return interaction.editReply("❌ Metrics constraints must remain between 1 and 100 entries.");
+        if (targetAmount < 1 || targetAmount > 100) return interaction.editReply("❌ Constraints remain between 1 and 100.");
 
         const clearPackets = await channel.bulkDelete(targetAmount, true).catch(() => []);
         const purgeEmbed = new EmbedBuilder().setTitle("🧹 Channel Purged").setColor(0x95A5A6).setDescription(`Cleared \`${clearPackets.size}\` records.`).setTimestamp();
@@ -829,7 +778,7 @@ client.on('interactionCreate', async interaction => {
         
         data.binds[guildId].push({ groupId, rankId, roleId: role.id, nicknameFormat, minInvites });
         saveData();
-        return interaction.editReply(`✅ Successfully linked **Group ${groupId} (Rank ${rankId})** directly to role <@&${role.id}>.`);
+        return interaction.editReply(`✅ Linked **Group ${groupId} (Rank ${rankId})** directly to role <@&${role.id}>.`);
     }
 
     if (commandName === 'sync-group-roles') {
@@ -849,7 +798,7 @@ client.on('interactionCreate', async interaction => {
                 data.binds[guildId].push({ groupId: targetGroupId, rankId: r.rank, roleId: existingRole.id, nicknameFormat: null, minInvites: 0 });
             }
             saveData();
-            return interaction.editReply(`🎉 **Sync complete!** All ranks for Group \`${targetGroupId}\` have been generated and mapped.`);
+            return interaction.editReply(`🎉 **Sync complete!** Ranks for Group \`${targetGroupId}\` mapped smoothly.`);
         } catch (e) { return interaction.editReply(`❌ Sync failed: ${e.message}`); }
     }
 
@@ -861,20 +810,57 @@ client.on('interactionCreate', async interaction => {
         const categoryName = options.getString('category-name').toLowerCase().replace(/\s+/g, '_');
         const rolesListString = options.getString('roles-list');
         const minRank = options.getInteger('min-rank');
+        const maxRank = options.getInteger('max-rank') ?? 255;
         const parsedIds = [...rolesListString.matchAll(/\d+/g)].map(match => match[0]);
 
         if (!parsedIds.length) return interaction.editReply("❌ No valid Discord roles extracted.");
-        const storagePoolKey = `${targetGroupId}_${categoryName}`;
 
-        if (!data.milestoneRoles) data.milestoneRoles = {};
-        if (!data.milestoneThresholds) data.milestoneThresholds = {};
-        if (!data.milestoneRoles[guildId]) data.milestoneRoles[guildId] = {};
-        if (!data.milestoneThresholds[guildId]) data.milestoneThresholds[guildId] = {};
+        if (!data.milestones[guildId]) data.milestones[guildId] = {};
 
-        data.milestoneRoles[guildId][storagePoolKey] = parsedIds;
-        data.milestoneThresholds[guildId][storagePoolKey] = minRank;
+        data.milestones[guildId][categoryName] = {
+            groupId: targetGroupId,
+            minRank: minRank,
+            maxRank: maxRank,
+            roles: parsedIds
+        };
         saveData();
-        return interaction.editReply(`✅ Milestone saved. Anyone at or above **Rank ${minRank}** in **Group ${targetGroupId}** receives these pool roles.`);
+        return interaction.editReply(`✅ Milestone saved. Anyone within **Rank ${minRank} to ${maxRank}** in **Group ${targetGroupId}** will be processed.`);
+    }
+
+    if (commandName === 'view-milestones') {
+        await interaction.deferReply();
+        const serverMilestones = data.milestones?.[guildId] || {};
+        const keys = Object.keys(serverMilestones);
+        
+        if (!keys.length) return interaction.editReply("❌ No active milestone pools configured on this server.");
+        
+        let poolList = [];
+        for (const [name, config] of Object.entries(serverMilestones)) {
+            const rolesRendered = config.roles.map(id => `<@&${id}>`).join(', ');
+            poolList.push(`• **Pool:** \`${name}\`\n  ↳ **Group ID:** ${config.groupId}\n  ↳ **Rank Range:** \`${config.minRank} - ${config.maxRank}\`\n  ↳ **Roles:** ${rolesRendered}`);
+        }
+
+        const embed = new EmbedBuilder()
+            .setTitle("Active Milestone Tracking Configurations")
+            .setDescription(poolList.join('\n\n'))
+            .setColor(0x3498DB);
+            
+        return interaction.editReply({ embeds: [embed] });
+    }
+
+    if (commandName === 'remove-milestone') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        await interaction.deferReply();
+        
+        const targetCategory = options.getString('category-name').toLowerCase().replace(/\s+/g, '_');
+        
+        if (!data.milestones?.[guildId] || !data.milestones[guildId][targetCategory]) {
+            return interaction.editReply(`❌ Could not locate milestone pool: \`${targetCategory}\`.`);
+        }
+        
+        delete data.milestones[guildId][targetCategory];
+        saveData();
+        return interaction.editReply(`🗑️ Successfully deleted milestone category pool: \`${targetCategory}\`.`);
     }
 
     if (commandName === 'view-binds') {
@@ -1061,14 +1047,13 @@ client.on('interactionCreate', async interaction => {
         const verifiedIds = Object.keys(data.users);
         const targetsToUpdate = serverMembers.filter(m => verifiedIds.includes(m.id) && !m.user.bot);
 
-        if (targetsToUpdate.size === 0) return interaction.editReply("ℹ️ No globally verified users found inside this server matrix to update.");
+        if (targetsToUpdate.size === 0) return interaction.editReply("ℹ️ No verified users found to update.");
 
         await interaction.editReply(`🔄 **Batch Sync Initiated:** Processing updates for \`${targetsToUpdate.size}\` verified profiles...`);
 
         let updateSuccessCount = 0;
         for (const [id, targetMember] of targetsToUpdate) {
             try {
-                // Emulate standard update processing logic
                 const robloxId = data.users[targetMember.id];
                 const serverBinds = data.binds ? data.binds[guildId] : [];
                 const userInvData = data.invites[guildId]?.[targetMember.id] || { regular: 0, left: 0 };
@@ -1099,19 +1084,16 @@ client.on('interactionCreate', async interaction => {
                     }
                 }
 
-                const sRolesMap = data.milestoneRoles[guildId] || {};
-                const sThresholds = data.milestoneThresholds[guildId] || {};
-
-                for (const [poolKey, roleIdsArray] of Object.entries(sRolesMap)) {
-                    const parsedMeta = poolKey.split('_');
-                    const targetGroupId = parsedMeta[0];
-                    const targetedMatch = userGroupsCache.find(g => g.group.id.toString() === targetGroupId.toString());
+                const serverMilestones = data.milestones[guildId] || {};
+                for (const [categoryName, config] of Object.entries(serverMilestones)) {
+                    const targetedMatch = userGroupsCache.find(g => g.group.id.toString() === config.groupId.toString());
                     const evaluatedRank = targetedMatch ? targetedMatch.role.rank : 0;
-                    const minRequiredRank = sThresholds[poolKey] ?? 0;
-                    const qualifies = evaluatedRank >= minRequiredRank;
+                    const minRequiredRank = config.minRank ?? 0;
+                    const maxRequiredRank = config.maxRank ?? 255;
+                    const qualifies = (evaluatedRank >= minRequiredRank && evaluatedRank <= maxRequiredRank);
 
-                    if (Array.isArray(roleIdsArray)) {
-                        for (const rId of roleIdsArray) {
+                    if (Array.isArray(config.roles)) {
+                        for (const rId of config.roles) {
                             const discordRole = interaction.guild.roles.cache.get(rId);
                             if (!discordRole) continue;
                             const hasRole = targetMember.roles.cache.has(rId);
@@ -1121,14 +1103,13 @@ client.on('interactionCreate', async interaction => {
                     }
                 }
                 updateSuccessCount++;
-                // 1-second delay per user to safeguard against proxy/Discord rate limits
                 await new Promise(resolve => setTimeout(resolve, 1000));
             } catch (memberErr) {
-                console.log(`Failed automated role sync for member ${targetMember.id}:`, memberErr.message);
+                console.log(`Failed role sync for member ${targetMember.id}:`, memberErr.message);
             }
         }
 
-        return interaction.channel.send(`🎉 **Mass Synchronization Completed!** Successfully verified and updated \`${updateSuccessCount}/${targetsToUpdate.size}\` network profile configurations.`);
+        return interaction.channel.send(`🎉 **Mass Synchronization Completed!** Updated \`${updateSuccessCount}/${targetsToUpdate.size}\` network configurations.`);
     }
 
     if (commandName === 'invites-leaderboard') {
@@ -1150,11 +1131,10 @@ client.on('interactionCreate', async interaction => {
             await interaction.deferReply();
             const selectedRole = options.getRole('role');
 
-            if (!data.giveawayRole) data.giveawayRole = {};
             data.giveawayRole[guildId] = selectedRole.id;
             saveData();
 
-            return interaction.editReply(`✅ **Giveaway Staff Configured:** Members must possess the <@&${selectedRole.id}> role or possess Manage Messages permissions to run community giveaways.`);
+            return interaction.editReply(`✅ **Giveaway Staff Configured:** Members must possess the <@&${selectedRole.id}> role to run community giveaways.`);
         }
 
         if (sub === 'create') {
@@ -1163,7 +1143,7 @@ client.on('interactionCreate', async interaction => {
             const traditionalPerms = member.permissions.has(PermissionFlagsBits.ManageMessages);
 
             if (!traditionalPerms && !hasCustomRole) {
-                return interaction.reply({ content: "❌ Access Denied. You do not possess the required Giveaway Staff role or permissions.", flags: [MessageFlags.Ephemeral] });
+                return interaction.reply({ content: "❌ Access Denied. You do not possess the required Giveaway Staff role.", flags: [MessageFlags.Ephemeral] });
             }
             await interaction.deferReply();
 
@@ -1222,7 +1202,7 @@ client.on('interactionCreate', async interaction => {
                     .setColor(0x7F8C8D)
                     .setDescription(winnersList.length > 0 
                         ? `**Congratulations to the winners:**\n${winnersList.map(id => `<@${id}>`).join(', ')}`
-                        : "No valid participants entered the matrix pool.");
+                        : "No valid participants entered.");
 
                 await msg.edit({ embeds: [finalEmbed], components: [] });
 
