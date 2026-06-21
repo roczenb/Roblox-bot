@@ -43,7 +43,7 @@ let data = {
     milestoneRoles: {},     
     milestoneThresholds: {},
     logsChannels: { system: null, moderator: null, movement: null },
-    verifiedRoleId: {}, // Stores the customizable verified role per server
+    verifiedRoleId: {}, 
     ticketCounter: {}
 };
 
@@ -195,7 +195,7 @@ client.once('ready', async () => {
         for (const [guildId] of guilds) {
             await rest.put(Routes.applicationGuildCommands(client.user.id, guildId), { body: commands });
         }
-        console.log('Bot fully armed and setup with customizable verification role options!');
+        console.log('Bot fully armed and setup with Dyno-style command layout infrastructure configurations!');
     } catch (e) { console.error(e); }
 });
 
@@ -370,6 +370,37 @@ client.on('roleDelete', role => { if (role.guild) incrementSecurityTrigger(role.
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
+    // --- PREFIX BASED COMMAND LISTENER FORMAT ---
+    if (message.content.startsWith('?')) {
+        const structuralArgs = message.content.slice(1).trim().split(/ +/);
+        const invokerTarget = structuralArgs.shift().toLowerCase();
+
+        if (invokerTarget === 'moderation' || invokerTarget === 'mod') {
+            const hasModPerms = message.member.permissions.has(PermissionFlagsBits.ManageMessages) || 
+                                message.member.permissions.has(PermissionFlagsBits.KickMembers) || 
+                                message.member.permissions.has(PermissionFlagsBits.BanMembers);
+            if (!hasModPerms) return;
+
+            // DYNO BOT EMBED SCHEMATIC ARCHITECTURE
+            const dynoHelpMenuEmbed = new EmbedBuilder()
+                .setColor(0x3498DB) // Official Dyno Vibrant Dodger Blue Color Profile
+                .setAuthor({ name: `${client.user.username} Help`, iconURL: client.user.displayAvatarURL() })
+                .setTitle("Moderator Commands")
+                .setDescription(`Custom modules running active across server networks.\nPrefix: \`?\` | Run \`?help [command]\` to view extended info bounds.`)
+                .addFields(
+                    { name: "⚙️ ?purge `[count]`", value: "Delete packages of text logs up to a 100 record limitation buffer.", inline: false },
+                    { name: "🔨 ?ban `[user]` `(reason)`", value: "Permanently restrict and ban malicious endpoints from access networks.", inline: false },
+                    { name: "👢 ?kick `[user]` `(reason)`", value: "Forcibly eject a targeted profile link connection from the guild matrix.", inline: false },
+                    { name: "⏳ ?timeout `[user]` `[minutes]`", value: "Apply a text silencer and restrict message creation variables completely.", inline: false },
+                    { name: "🔊 ?unmute `[user]`", value: "Lift isolation and manually restore text communication capability metrics.", inline: false }
+                )
+                .setFooter({ text: `${message.guild.name} • Page 1 of 1`, iconURL: message.guild.iconURL() })
+                .setTimestamp();
+
+            return message.channel.send({ embeds: [dynoHelpMenuEmbed] });
+        }
+    }
+
     const isEnabled = data.antimention ? data.antimention[message.guild.id] : false;
     if (!isEnabled) return;
 
@@ -439,7 +470,6 @@ async function runVerificationProcess(interaction, usernameInput, targetUser) {
         data.users[targetUser.id] = rId;
         saveData();
 
-        // AUTOMATIC CUSTOM VERIFIED ROLE ASSIGNMENT
         try {
             const memberTarget = await interaction.guild.members.fetch(targetUser.id);
             const activeVerifiedRoleId = data.verifiedRoleId?.[interaction.guildId];
@@ -589,7 +619,6 @@ client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName, options, guildId, member, channel } = interaction;
 
-    // CUSTOMIZABLE VERIFIED ROLE ALLOCATION SYSTEM SETUP COMMAND
     if (commandName === 'setup-verified-role') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
