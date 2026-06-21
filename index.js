@@ -117,6 +117,9 @@ const commands = [
     
     new SlashCommandBuilder().setName('sync-group-roles').setDescription('Auto-bind an entire group structure by chain of command')
         .addStringOption(o => o.setName('groupid').setDescription('Roblox Group ID to completely map out').setRequired(true)),
+
+    new SlashCommandBuilder().setName('mass-sync-divisions').setDescription('Admin Only: Provide a space-separated list of group IDs to sync all ranks and milestone tracks at once')
+        .addStringOption(o => o.setName('group-ids').setDescription('Paste space-separated group IDs').setRequired(true)),
     
     new SlashCommandBuilder().setName('bind').setDescription('Bind a specific rank to a role')
         .addStringOption(o => o.setName('groupid').setDescription('Roblox Group ID').setRequired(true))
@@ -802,6 +805,74 @@ client.on('interactionCreate', async interaction => {
         } catch (e) { return interaction.editReply(`❌ Sync failed: ${e.message}`); }
     }
 
+    if (commandName === 'mass-sync-divisions') {
+        if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+        await interaction.deferReply();
+    
+        const rawInput = options.getString('group-ids');
+        const groupIds = [...rawInput.matchAll(/\d+/g)].map(match => match[0]);
+    
+        if (!groupIds.length) return interaction.editReply("❌ No valid group IDs detected in your input text.");
+    
+        await interaction.editReply(`🔄 **Mass Processing Initiated:** Preparing to sync \`${groupIds.length}\` groups...`);
+    
+        let successfullySynced = 0;
+        const existingRoles = await interaction.guild.roles.fetch();
+    
+        for (const groupId of groupIds) {
+            try {
+                const rRoles = (await axios.get(`https://groups.roproxy.com/v1/groups/${groupId}/roles`)).data.roles.filter(r => r.rank > 0).sort((a, b) => a.rank - b.rank);
+                
+                if (!data.binds[guildId]) data.binds[guildId] = [];
+                let officerRoleIds = [];
+                let hicomRoleIds = [];
+    
+                for (const r of rRoles) {
+                    data.binds[guildId] = data.binds[guildId].filter(b => !(b.groupId === groupId && b.rankId === r.rank));
+                    
+                    let existingRole = existingRoles.find(role => role.name === r.name);
+                    if (!existingRole) {
+                        existingRole = await interaction.guild.roles.create({ name: r.name, reason: `Mass-sync group ${groupId}` });
+                    }
+                    
+                    data.binds[guildId].push({ groupId: groupId, rankId: r.rank, roleId: existingRole.id, nicknameFormat: null, minInvites: 0 });
+    
+                    if (r.rank >= 50 && r.rank <= 200) officerRoleIds.push(existingRole.id);
+                    if (r.rank >= 201) hicomRoleIds.push(existingRole.id);
+                }
+    
+                if (!data.milestones) data.milestones = {};
+                if (!data.milestones[guildId]) data.milestones[guildId] = {};
+    
+                if (officerRoleIds.length > 0) {
+                    data.milestones[guildId][`grp_${groupId}_officers`] = {
+                        groupId: groupId,
+                        minRank: 50,
+                        maxRank: 200,
+                        roles: officerRoleIds
+                    };
+                }
+    
+                if (hicomRoleIds.length > 0) {
+                    data.milestones[guildId][`grp_${groupId}_hicom`] = {
+                        groupId: groupId,
+                        minRank: 201,
+                        maxRank: 255,
+                        roles: hicomRoleIds
+                    };
+                }
+    
+                successfullySynced++;
+                await new Promise(resolve => setTimeout(resolve, 1500));
+            } catch (err) {
+                console.error(`Failed automated setup routine for group ID ${groupId}:`, err.message);
+            }
+        }
+    
+        saveData();
+        return interaction.channel.send(`🎉 **Mass Configuration Completed Successfully!** Automatically initialized structural configurations and milestone grids for \`${successfullySynced}/${groupIds.length}\` Roblox groups.`);
+    }
+
     if (commandName === 'setup-milestones') {
         if (!member.permissions.has(PermissionFlagsBits.Administrator)) return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
         await interaction.deferReply();
@@ -1156,7 +1227,7 @@ client.on('interactionCreate', async interaction => {
             const giveawayEmbed = new EmbedBuilder()
                 .setTitle("🎉 COMMUNITY GIVEAWAY 🎉")
                 .setColor(0x00FFFF)
-                .setDescription(`Click the **Join Giveaway** button below to enter!`)
+                .setDescription("Click the **Join Giveaway** button below to enter!")
                 .addFields(
                     { name: "🎁 Prize:", value: `**${prize}**`, inline: true },
                     { name: "👥 Entrants:", value: "`0`", inline: true },
