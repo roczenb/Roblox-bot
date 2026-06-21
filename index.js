@@ -25,7 +25,8 @@ const client = new Client({
         GatewayIntentBits.GuildMessages,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildInvites,
-        GatewayIntentBits.GuildModeration
+        GatewayIntentBits.GuildModeration,
+        GatewayIntentBits.GuildMessageReactions
     ] 
 });
 
@@ -45,7 +46,8 @@ let data = {
     logsChannels: { system: null, moderator: null, movement: null },
     verifiedRoleId: {}, 
     unverifiedRoleId: {},
-    ticketCounter: {}
+    ticketCounter: {},
+    giveawayRole: {} // Guild ID -> Allowed Role ID mapping
 };
 
 const verificationCodes = new Map();
@@ -77,6 +79,7 @@ function loadData() {
             if (!data.verifiedRoleId) data.verifiedRoleId = {};
             if (!data.unverifiedRoleId) data.unverifiedRoleId = {};
             if (!data.ticketCounter) data.ticketCounter = {};
+            if (!data.giveawayRole) data.giveawayRole = {};
         }
     } catch (e) { console.log("Data loaded smoothly."); }
 }
@@ -178,7 +181,15 @@ const commands = [
     new SlashCommandBuilder().setName('timeout').setDescription('Admin Only: Timeout a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)).addIntegerOption(o => o.setName('minutes').setDescription('Duration in minutes').setRequired(true)),
     new SlashCommandBuilder().setName('unmute').setDescription('Admin Only: Lift an active timeout from a member').addUserOption(o => o.setName('target').setDescription('User').setRequired(true)),
     new SlashCommandBuilder().setName('say').setDescription('Make the bot echo text messages').addStringOption(o => o.setName('text').setDescription('Text message to broadcast').setRequired(true)),
-    new SlashCommandBuilder().setName('giveaway').setDescription('Manage community giveaways').addSubcommand(s => s.setName('create').setDescription('Initialize a server giveaway package')),
+    
+    new SlashCommandBuilder().setName('giveaway').setDescription('Manage community giveaways')
+        .addSubcommand(s => s.setName('create').setDescription('Initialize a server giveaway package')
+            .addStringOption(o => o.setName('prize').setDescription('What is being given away?').setRequired(true))
+            .addIntegerOption(o => o.setName('duration').setDescription('Duration of giveaway in minutes').setRequired(true))
+            .addIntegerOption(o => o.setName('winners').setDescription('Number of potential winners').setRequired(false)))
+        .addSubcommand(s => s.setName('toggle-role').setDescription('Admin Only: Toggle custom staff role required to manage giveaways')
+            .addRoleOption(o => o.setName('role').setDescription('The role allowed to create giveaways').setRequired(true))),
+            
     new SlashCommandBuilder().setName('tickets').setDescription('Manage the ticketing system pipeline')
         .addSubcommand(s => s.setName('setup').setDescription('Admin Only: Send the interactive support panel to this channel')),
     new SlashCommandBuilder().setName('purge').setDescription('Admin Only: Delete bulk message packets')
@@ -219,7 +230,6 @@ client.on('guildMemberAdd', async member => {
         } catch (e) { console.error(e); }
     }
 
-    // Auto assign unverified role if mapped out
     const activeUnverifiedId = data.unverifiedRoleId?.[member.guild.id];
     if (activeUnverifiedId) {
         const targetUnvRole = member.guild.roles.cache.get(activeUnverifiedId);
@@ -382,12 +392,10 @@ client.on('roleDelete', role => { if (role.guild) incrementSecurityTrigger(role.
 client.on('messageCreate', async message => {
     if (!message.guild || message.author.bot) return;
 
-    // --- SEPARATE INDIVIDUAL TEXT PREFIX COMMAND HANDLING PIPELINE ---
     if (message.content.startsWith('?')) {
         const structuralArgs = message.content.slice(1).trim().split(/ +/);
         const invokerTarget = structuralArgs.shift().toLowerCase();
 
-        // ?moderation help command block
         if (invokerTarget === 'moderation' || invokerTarget === 'mod') {
             const hasModPerms = message.member.permissions.has(PermissionFlagsBits.ManageMessages) || 
                                 message.member.permissions.has(PermissionFlagsBits.KickMembers) || 
@@ -412,7 +420,6 @@ client.on('messageCreate', async message => {
             return message.channel.send({ embeds: [dynoHelpMenuEmbed] });
         }
 
-        // ?purge command logic
         if (invokerTarget === 'purge') {
             if (!message.member.permissions.has(PermissionFlagsBits.ManageMessages)) return;
             const count = parseInt(structuralArgs[0]);
@@ -432,14 +439,12 @@ client.on('messageCreate', async message => {
             return setTimeout(() => feedback.delete().catch(() => {}), 4000);
         }
 
-        // Helper resolver for raw ping parameters or direct numeric IDs
         const resolveTargetMember = async (argString) => {
             if (!argString) return null;
             const strictId = argString.replace(/[<@!>]/g, '');
             return await message.guild.members.fetch(strictId).catch(() => null);
         };
 
-        // ?ban command logic
         if (invokerTarget === 'ban') {
             if (!message.member.permissions.has(PermissionFlagsBits.BanMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
@@ -456,7 +461,6 @@ client.on('messageCreate', async message => {
             return message.reply(`🔨 **${targetUser.user.tag}** has been banned from the server grid matrix.`);
         }
 
-        // ?kick command logic
         if (invokerTarget === 'kick') {
             if (!message.member.permissions.has(PermissionFlagsBits.KickMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
@@ -473,7 +477,6 @@ client.on('messageCreate', async message => {
             return message.reply(`👢 **${targetUser.user.tag}** was forcibly expelled.`);
         }
 
-        // ?timeout command logic
         if (invokerTarget === 'timeout') {
             if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
@@ -492,7 +495,6 @@ client.on('messageCreate', async message => {
             return message.reply(`⏳ **${targetUser.user.tag}** isolated into isolation cells for ${dynamicMinutes} minutes.`);
         }
 
-        // ?unmute command logic
         if (invokerTarget === 'unmute') {
             if (!message.member.permissions.has(PermissionFlagsBits.ModerateMembers)) return;
             const targetUser = await resolveTargetMember(structuralArgs[0]);
@@ -581,7 +583,6 @@ async function runVerificationProcess(interaction, usernameInput, targetUser) {
         try {
             const memberTarget = await interaction.guild.members.fetch(targetUser.id);
             
-            // Remove unverified role if they have it
             const activeUnverifiedId = data.unverifiedRoleId?.[interaction.guildId];
             if (activeUnverifiedId && memberTarget.roles.cache.has(activeUnverifiedId)) {
                 await memberTarget.roles.remove(activeUnverifiedId).catch(() => {});
@@ -701,6 +702,26 @@ client.on('interactionCreate', async interaction => {
         }
         if (interaction.customId === 'panel_link_btn') {
             return interaction.reply({ content: "Execute command `/verify` to link accounts.", flags: [MessageFlags.Ephemeral] });
+        }
+
+        if (interaction.customId === 'giveaway_join_btn') {
+            await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
+            
+            if (!global.activeGiveaways) global.activeGiveaways = new Map();
+            const giveaway = global.activeGiveaways.get(interaction.message.id);
+            if (!giveaway) return interaction.editReply("❌ This giveaway has ended or is invalid.");
+            
+            if (giveaway.participants.has(interaction.user.id)) {
+                giveaway.participants.delete(interaction.user.id);
+                interaction.message.embeds[0].fields[1].value = `\`${giveaway.participants.size}\``;
+                await interaction.message.edit({ embeds: [interaction.message.embeds[0]] });
+                return interaction.editReply("❌ Left the giveaway entry matrix.");
+            } else {
+                giveaway.participants.add(interaction.user.id);
+                interaction.message.embeds[0].fields[1].value = `\`${giveaway.participants.size}\``;
+                await interaction.message.edit({ embeds: [interaction.message.embeds[0]] });
+                return interaction.editReply("🎉 Successfully entered the giveaway matrix pool!");
+            }
         }
 
         if (interaction.customId === 'open_ticket_btn') {
@@ -1031,6 +1052,85 @@ client.on('interactionCreate', async interaction => {
         return await runUpdateProcess(interaction, targetUser);
     }
 
+    if (commandName === 'updateall') {
+        const hasLeadCommand = member.roles.cache.some(r => r.name === LC_ROLE_NAME) || member.permissions.has(PermissionFlagsBits.Administrator);
+        if (!hasLeadCommand) return interaction.reply({ content: "❌ Lead Command Only.", flags: [MessageFlags.Ephemeral] });
+        
+        await interaction.deferReply();
+        const serverMembers = await interaction.guild.members.fetch();
+        const verifiedIds = Object.keys(data.users);
+        const targetsToUpdate = serverMembers.filter(m => verifiedIds.includes(m.id) && !m.user.bot);
+
+        if (targetsToUpdate.size === 0) return interaction.editReply("ℹ️ No globally verified users found inside this server matrix to update.");
+
+        await interaction.editReply(`🔄 **Batch Sync Initiated:** Processing updates for \`${targetsToUpdate.size}\` verified profiles...`);
+
+        let updateSuccessCount = 0;
+        for (const [id, targetMember] of targetsToUpdate) {
+            try {
+                // Emulate standard update processing logic
+                const robloxId = data.users[targetMember.id];
+                const serverBinds = data.binds ? data.binds[guildId] : [];
+                const userInvData = data.invites[guildId]?.[targetMember.id] || { regular: 0, left: 0 };
+                const netInvites = userInvData.regular - userInvData.left;
+
+                const gRes = await axios.get(`https://groups.roproxy.com/v2/users/${robloxId}/groups/roles`);
+                const userGroupsCache = gRes.data.data; 
+                const uLookup = await axios.get(`https://users.roproxy.com/v1/users/${robloxId}`);
+                const robloxName = uLookup.data.name;
+
+                for (const b of serverBinds) {
+                    const role = interaction.guild.roles.cache.get(b.roleId);
+                    if (role) {
+                        const targetedMatch = userGroupsCache.find(g => g.group.id.toString() === b.groupId.toString());
+                        const specificUserRank = targetedMatch ? targetedMatch.role.rank : 0;
+
+                        if (specificUserRank === b.rankId && netInvites >= (b.minInvites || 0)) { 
+                            if (!targetMember.roles.cache.has(role.id)) await targetMember.roles.add(role).catch(() => {});
+                            await applyUserRankMutations(targetMember, robloxId, b, robloxName);
+                        } else if (targetMember.roles.cache.has(role.id)) { 
+                            const safetyDuplicateCheck = serverBinds.some(otherB => {
+                                if (otherB.roleId !== b.roleId) return false;
+                                const altMatch = userGroupsCache.find(g => g.group.id.toString() === otherB.groupId.toString());
+                                return altMatch && altMatch.role.rank === otherB.rankId;
+                            });
+                            if (!safetyDuplicateCheck) await targetMember.roles.remove(role).catch(() => {}); 
+                        }
+                    }
+                }
+
+                const sRolesMap = data.milestoneRoles[guildId] || {};
+                const sThresholds = data.milestoneThresholds[guildId] || {};
+
+                for (const [poolKey, roleIdsArray] of Object.entries(sRolesMap)) {
+                    const parsedMeta = poolKey.split('_');
+                    const targetGroupId = parsedMeta[0];
+                    const targetedMatch = userGroupsCache.find(g => g.group.id.toString() === targetGroupId.toString());
+                    const evaluatedRank = targetedMatch ? targetedMatch.role.rank : 0;
+                    const minRequiredRank = sThresholds[poolKey] ?? 0;
+                    const qualifies = evaluatedRank >= minRequiredRank;
+
+                    if (Array.isArray(roleIdsArray)) {
+                        for (const rId of roleIdsArray) {
+                            const discordRole = interaction.guild.roles.cache.get(rId);
+                            if (!discordRole) continue;
+                            const hasRole = targetMember.roles.cache.has(rId);
+                            if (qualifies && !hasRole) await targetMember.roles.add(discordRole).catch(() => {});
+                            else if (!qualifies && hasRole) await targetMember.roles.remove(discordRole).catch(() => {});
+                        }
+                    }
+                }
+                updateSuccessCount++;
+                // 1-second delay per user to safeguard against proxy/Discord rate limits
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            } catch (memberErr) {
+                console.log(`Failed automated role sync for member ${targetMember.id}:`, memberErr.message);
+            }
+        }
+
+        return interaction.channel.send(`🎉 **Mass Synchronization Completed!** Successfully verified and updated \`${updateSuccessCount}/${targetsToUpdate.size}\` network profile configurations.`);
+    }
+
     if (commandName === 'invites-leaderboard') {
         await interaction.deferReply();
         const serverInvs = data.invites[guildId] || {};
@@ -1041,7 +1141,100 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (commandName === 'giveaway') {
-        return interaction.reply({ content: "🎉 Systems operational...", flags: [MessageFlags.Ephemeral] });
+        const sub = options.getSubcommand();
+
+        if (sub === 'toggle-role') {
+            if (!member.permissions.has(PermissionFlagsBits.Administrator)) {
+                return interaction.reply({ content: "❌ Access Denied.", flags: [MessageFlags.Ephemeral] });
+            }
+            await interaction.deferReply();
+            const selectedRole = options.getRole('role');
+
+            if (!data.giveawayRole) data.giveawayRole = {};
+            data.giveawayRole[guildId] = selectedRole.id;
+            saveData();
+
+            return interaction.editReply(`✅ **Giveaway Staff Configured:** Members must possess the <@&${selectedRole.id}> role or possess Manage Messages permissions to run community giveaways.`);
+        }
+
+        if (sub === 'create') {
+            const allowedRoleId = data.giveawayRole?.[guildId];
+            const hasCustomRole = allowedRoleId ? member.roles.cache.has(allowedRoleId) : false;
+            const traditionalPerms = member.permissions.has(PermissionFlagsBits.ManageMessages);
+
+            if (!traditionalPerms && !hasCustomRole) {
+                return interaction.reply({ content: "❌ Access Denied. You do not possess the required Giveaway Staff role or permissions.", flags: [MessageFlags.Ephemeral] });
+            }
+            await interaction.deferReply();
+
+            const prize = options.getString('prize');
+            const durationMinutes = options.getInteger('duration');
+            const totalWinners = options.getInteger('winners') || 1;
+
+            const endTimestamp = Math.floor((Date.now() + (durationMinutes * 60 * 1000)) / 1000);
+
+            const giveawayEmbed = new EmbedBuilder()
+                .setTitle("🎉 COMMUNITY GIVEAWAY 🎉")
+                .setColor(0x00FFFF)
+                .setDescription(`Click the **Join Giveaway** button below to enter!`)
+                .addFields(
+                    { name: "🎁 Prize:", value: `**${prize}**`, inline: true },
+                    { name: "👥 Entrants:", value: "`0`", inline: true },
+                    { name: "🏆 Winners Planned:", value: `\`${totalWinners}\``, inline: true },
+                    { name: "⏳ Ends:", value: `<t:${endTimestamp}:R> (<t:${endTimestamp}:f>)`, inline: false }
+                )
+                .setTimestamp();
+
+            const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder()
+                    .setCustomId('giveaway_join_btn')
+                    .setLabel('Join Giveaway')
+                    .setStyle(ButtonStyle.Primary)
+                    .setEmoji('🎉')
+            );
+
+            const msg = await interaction.editReply({ embeds: [giveawayEmbed], components: [row] });
+
+            if (!global.activeGiveaways) global.activeGiveaways = new Map();
+            const giveawayData = {
+                prize,
+                totalWinners,
+                participants: new Set(),
+                ended: false
+            };
+            global.activeGiveaways.set(msg.id, giveawayData);
+
+            setTimeout(async () => {
+                const currentData = global.activeGiveaways.get(msg.id);
+                if (!currentData || currentData.ended) return;
+                currentData.ended = true;
+
+                const entrantIds = Array.from(currentData.participants);
+                let winnersList = [];
+
+                if (entrantIds.length > 0) {
+                    const shuffled = entrantIds.sort(() => 0.5 - Math.random());
+                    winnersList = shuffled.slice(0, currentData.totalWinners);
+                }
+
+                const finalEmbed = EmbedBuilder.from(giveawayEmbed)
+                    .setTitle("🎉 GIVEAWAY ENDED 🎉")
+                    .setColor(0x7F8C8D)
+                    .setDescription(winnersList.length > 0 
+                        ? `**Congratulations to the winners:**\n${winnersList.map(id => `<@${id}>`).join(', ')}`
+                        : "No valid participants entered the matrix pool.");
+
+                await msg.edit({ embeds: [finalEmbed], components: [] });
+
+                if (winnersList.length > 0) {
+                    await channel.send(`🎉 **Giveaway Ended!** Congratulations to ${winnersList.map(id => `<@${id}>`).join(', ')} for winning **${currentData.prize}**!`);
+                } else {
+                    await channel.send(`ℹ️ Giveaway for **${currentData.prize}** ended, but nobody joined.`);
+                }
+
+                global.activeGiveaways.delete(msg.id);
+            }, durationMinutes * 60 * 1000);
+        }
     }
 });
 
